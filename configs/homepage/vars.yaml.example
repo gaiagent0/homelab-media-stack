@@ -1,0 +1,25 @@
+# configs/homepage/vars.yaml.example
+# ─────────────────────────────────────────────────────────────
+# Homepage variable substitution — {{HOMEPAGE_VAR_X}} syntax
+# ─────────────────────────────────────────────────────────────
+# Homepage reads HOMEPAGE_VAR_* values from the container's
+# environment variables, which are passed in via docker-compose.yml
+# from your .env file.
+#
+# Workflow:
+#   1. Copy root .env.example → .env
+#   2. Fill in all HOMEPAGE_VAR_* values in .env
+#   3. docker compose up -d homepage
+#
+# Where to find each API key:
+#   Jellyfin     → Dashboard → API Keys → + (new key)
+#   Jellyseerr   → Settings → General → API Key
+#   Radarr       → Settings → General → API Key
+#   Sonarr       → Settings → General → API Key
+#   Lidarr       → Settings → General → API Key
+#   Prowlarr     → Settings → General → API Key
+#   Bazarr       → Settings → General → API Key
+#   qBittorrent  → password you set in WebUI Options
+#
+# LXC IP: the IP of CT302 on your Proxmox network (e.g. 10.10.40.32)
+# ─────────────────────────────────────────────────────────────
