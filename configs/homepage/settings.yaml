@@ -1,0 +1,23 @@
+---
+# Homepage settings.yaml
+
+title: Homelab — pve-03 Media Stack
+description: CT302 docker-host | ZFS rpool/mediastore
+favicon: https://raw.githubusercontent.com/gethomepage/homepage/main/public/favicon.ico
+
+theme: dark
+color: slate
+
+headerStyle: clean
+target: _blank
+
+layout:
+  Media:
+    style: row
+    columns: 3
+  Downloads:
+    style: row
+    columns: 3
+  Tools:
+    style: row
+    columns: 3

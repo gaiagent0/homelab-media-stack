@@ -1,0 +1,21 @@
+---
+# Homepage widgets.yaml
+# Top-bar system info widgets
+
+- resources:
+    label: CT302 docker-host
+    cpu: true
+    memory: true
+    disk: /mnt/mediastore
+    expanded: true
+
+- datetime:
+    text_size: xl
+    format:
+      timeStyle: short
+      dateStyle: short
+      hourCycle: h23
+
+- search:
+    provider: duckduckgo
+    target: _blank
