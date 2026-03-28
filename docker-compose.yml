@@ -1,0 +1,305 @@
+---
+# homelab-media-stack — docker-compose.yml
+# Proxmox LXC CT302 (docker-host) | pve-03 | ZFS rpool/mediastore
+# TRaSH Guides: single /data mount, hardlink import
+# Usage: docker compose --env-file .env up -d
+
+networks:
+  media_network:
+    driver: bridge
+
+services:
+
+  # ─────────────────────────────────────────────────────────────
+  # VPN: Gluetun killswitch
+  # qBittorrent is network_mode: service:gluetun — shares its IP
+  # ─────────────────────────────────────────────────────────────
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "8080:8080"    # qBittorrent WebUI (exposed via gluetun)
+    environment:
+      - VPN_SERVICE_PROVIDER=${VPN_PROVIDER:-private internet access}
+      - VPN_TYPE=${VPN_TYPE:-openvpn}
+      - OPENVPN_USER=${OPENVPN_USER}
+      - OPENVPN_PASSWORD=${OPENVPN_PASSWORD}
+      - SERVER_REGIONS=${VPN_REGION:-Hungary}
+      - UPDATER_PERIOD=24h
+      - TZ=${TZ}
+    volumes:
+      - ${DOCKER_VOLUMES}/gluetun:/gluetun
+    restart: unless-stopped
+    networks:
+      - media_network
+
+  # ─────────────────────────────────────────────────────────────
+  # Torrent client — uses Gluetun network
+  # ─────────────────────────────────────────────────────────────
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_started   # NOT service_healthy — Gluetun API can timeout
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - WEBUI_PORT=8080
+    volumes:
+      - ${DOCKER_VOLUMES}/qbittorrent:/config
+      - ${DATA_PATH}:/data
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────────
+  # Indexer manager
+  # ─────────────────────────────────────────────────────────────
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${DOCKER_VOLUMES}/prowlarr:/config
+    ports:
+      - "9696:9696"
+    restart: unless-stopped
+    networks:
+      - media_network
+
+  # ─────────────────────────────────────────────────────────────
+  # Movie automation
+  # ─────────────────────────────────────────────────────────────
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${DOCKER_VOLUMES}/radarr:/config
+      - ${DATA_PATH}:/data
+    ports:
+      - "7878:7878"
+    restart: unless-stopped
+    networks:
+      - media_network
+
+  # ─────────────────────────────────────────────────────────────
+  # TV automation
+  # ─────────────────────────────────────────────────────────────
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${DOCKER_VOLUMES}/sonarr:/config
+      - ${DATA_PATH}:/data
+    ports:
+      - "8989:8989"
+    restart: unless-stopped
+    networks:
+      - media_network
+
+  # ─────────────────────────────────────────────────────────────
+  # Music automation
+  # ─────────────────────────────────────────────────────────────
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: lidarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${DOCKER_VOLUMES}/lidarr:/config
+      - ${DATA_PATH}:/data
+    ports:
+      - "8686:8686"
+    restart: unless-stopped
+    networks:
+      - media_network
+
+  # ─────────────────────────────────────────────────────────────
+  # Subtitle automation
+  # ─────────────────────────────────────────────────────────────
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${DOCKER_VOLUMES}/bazarr:/config
+      - ${DATA_PATH}:/data
+    ports:
+      - "6767:6767"
+    restart: unless-stopped
+    networks:
+      - media_network
+
+  # ─────────────────────────────────────────────────────────────
+  # Media server — AMD VA-API hardware transcode
+  # ─────────────────────────────────────────────────────────────
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:latest
+    container_name: jellyfin
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${DOCKER_VOLUMES}/jellyfin:/config
+      - ${DATA_PATH}:/data
+    ports:
+      - "${JELLYFIN_PORT:-8096}:8096"
+      - "8920:8920"
+      - "7359:7359/udp"
+    restart: unless-stopped
+    networks:
+      - media_network
+
+  # ─────────────────────────────────────────────────────────────
+  # Request UI
+  # ─────────────────────────────────────────────────────────────
+  jellyseerr:
+    image: fallenbagel/jellyseerr:latest
+    container_name: jellyseerr
+    environment:
+      - TZ=${TZ}
+    volumes:
+      - ${DOCKER_VOLUMES}/jellyseerr:/app/config
+    ports:
+      - "5055:5055"
+    restart: unless-stopped
+    networks:
+      - media_network
+
+  # ─────────────────────────────────────────────────────────────
+  # Watch statistics (PostgreSQL backend)
+  # ─────────────────────────────────────────────────────────────
+  jellystat-db:
+    image: postgres:15
+    container_name: jellystat-db
+    environment:
+      - POSTGRES_DB=jfstat
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - ${DOCKER_VOLUMES}/jellystat-db:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - media_network
+
+  jellystat:
+    image: cyfershepard/jellystat:latest
+    container_name: jellystat
+    depends_on:
+      - jellystat-db
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_IP=jellystat-db
+      - POSTGRES_PORT=5432
+      - JWT_SECRET=${JELLYSTAT_JWT_SECRET}
+      - TZ=${TZ}
+    volumes:
+      - ${DOCKER_VOLUMES}/jellystat:/app/backend/backup-data
+    ports:
+      - "3010:3000"
+    restart: unless-stopped
+    networks:
+      - media_network
+
+  # ─────────────────────────────────────────────────────────────
+  # Quality profile sync (TRaSH Guides profiles)
+  # ─────────────────────────────────────────────────────────────
+  profilarr:
+    image: ghcr.io/dictionaryhouse/profilarr:latest
+    container_name: profilarr
+    volumes:
+      - ${DOCKER_VOLUMES}/profilarr:/config
+    ports:
+      - "9850:9850"
+    restart: unless-stopped
+    networks:
+      - media_network
+
+  # ─────────────────────────────────────────────────────────────
+  # Transcode automation — scheduled to avoid PBS backup window
+  # ─────────────────────────────────────────────────────────────
+  tdarr:
+    image: ghcr.io/haveagitgat/tdarr:latest
+    container_name: tdarr
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - serverIP=0.0.0.0
+      - serverPort=8266
+      - webUIPort=8265
+      - internalNode=true
+      - inContainer=true
+      - nodeName=MyInternalNode
+    volumes:
+      - ${DOCKER_VOLUMES}/tdarr/server:/app/server
+      - ${DOCKER_VOLUMES}/tdarr/configs:/app/configs
+      - ${DOCKER_VOLUMES}/tdarr/logs:/app/logs
+      - ${DATA_PATH}:/data
+      - /tmp/tdarr_transcode:/temp
+    ports:
+      - "8265:8265"
+      - "8266:8266"
+    restart: unless-stopped
+    networks:
+      - media_network
+
+  # ─────────────────────────────────────────────────────────────
+  # Invite manager (Cloudflare Tunnel for external access)
+  # ─────────────────────────────────────────────────────────────
+  wizarr:
+    image: ghcr.io/wizarrrr/wizarr:latest
+    container_name: wizarr
+    environment:
+      - TZ=${TZ}
+    volumes:
+      - ${DOCKER_VOLUMES}/wizarr:/data/database
+    ports:
+      - "5690:5690"
+    restart: unless-stopped
+    networks:
+      - media_network
+
+  # ─────────────────────────────────────────────────────────────
+  # Dashboard — port 3001 (avoid conflict with Gitea on 3000)
+  # ─────────────────────────────────────────────────────────────
+  homepage:
+    image: ghcr.io/gethomepage/homepage:latest
+    container_name: homepage
+    environment:
+      - TZ=${TZ}
+    volumes:
+      - ${DOCKER_VOLUMES}/homepage:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "3001:3000"
+    restart: unless-stopped
+    networks:
+      - media_network
