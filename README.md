@@ -60,7 +60,7 @@ Hardlinks require source and target on the **same filesystem**. With one `/data`
 
 ```bash
 # 1. Clone repo into docker-host LXC (CT302)
-git clone https://github.com/YOUR_USER/homelab-media-stack.git /root/mediaserver
+git clone https://github.com/gaiagent0/homelab-media-stack.git /root/mediaserver
 cd /root/mediaserver
 
 # 2. Configure environment
