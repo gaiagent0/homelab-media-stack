@@ -12,7 +12,7 @@ services:
 
   # ─────────────────────────────────────────────────────────────
   # VPN: Gluetun killswitch
-  # qBittorrent uses network_mode: service:gluetun — shares its IP
+  # qBittorrent is network_mode: service:gluetun — shares its IP
   # ─────────────────────────────────────────────────────────────
   gluetun:
     image: qmcgaw/gluetun:latest
@@ -38,7 +38,7 @@ services:
       - media_network
 
   # ─────────────────────────────────────────────────────────────
-  # Torrent client — uses Gluetun network namespace
+  # Torrent client — uses Gluetun network
   # ─────────────────────────────────────────────────────────────
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:latest
@@ -191,14 +191,14 @@ services:
       - media_network
 
   # ─────────────────────────────────────────────────────────────
-  # Watch statistics — PostgreSQL backend
+  # Watch statistics (PostgreSQL backend)
   # ─────────────────────────────────────────────────────────────
   jellystat-db:
     image: postgres:15
     container_name: jellystat-db
     environment:
       - POSTGRES_DB=jfstat
-      - POSTGRES_USER=postgres       # hardcoded — must match jellystat service
+      - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
       - ${DOCKER_VOLUMES}/jellystat-db:/var/lib/postgresql/data
@@ -212,7 +212,7 @@ services:
     depends_on:
       - jellystat-db
     environment:
-      - POSTGRES_USER=postgres        # must match jellystat-db POSTGRES_USER
+      - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_IP=jellystat-db
       - POSTGRES_PORT=5432
@@ -227,7 +227,7 @@ services:
       - media_network
 
   # ─────────────────────────────────────────────────────────────
-  # Quality profile sync (TRaSH Guides)
+  # Quality profile sync (TRaSH Guides profiles)
   # ─────────────────────────────────────────────────────────────
   profilarr:
     image: ghcr.io/dictionaryhouse/profilarr:latest
@@ -272,7 +272,7 @@ services:
       - media_network
 
   # ─────────────────────────────────────────────────────────────
-  # Invite manager — Cloudflare Tunnel for external access
+  # Invite manager (Cloudflare Tunnel for external access)
   # ─────────────────────────────────────────────────────────────
   wizarr:
     image: ghcr.io/wizarrrr/wizarr:latest
@@ -289,22 +289,12 @@ services:
 
   # ─────────────────────────────────────────────────────────────
   # Dashboard — port 3001 (avoid conflict with Gitea on 3000)
-  # HOMEPAGE_VAR_* vars are read from .env and injected as widgets API keys
   # ─────────────────────────────────────────────────────────────
   homepage:
     image: ghcr.io/gethomepage/homepage:latest
     container_name: homepage
     environment:
       - TZ=${TZ}
-      - HOMEPAGE_VAR_LXC_IP=${HOMEPAGE_VAR_LXC_IP}
-      - HOMEPAGE_VAR_JELLYFIN_API_KEY=${HOMEPAGE_VAR_JELLYFIN_API_KEY}
-      - HOMEPAGE_VAR_JELLYSEERR_API_KEY=${HOMEPAGE_VAR_JELLYSEERR_API_KEY}
-      - HOMEPAGE_VAR_RADARR_API_KEY=${HOMEPAGE_VAR_RADARR_API_KEY}
-      - HOMEPAGE_VAR_SONARR_API_KEY=${HOMEPAGE_VAR_SONARR_API_KEY}
-      - HOMEPAGE_VAR_LIDARR_API_KEY=${HOMEPAGE_VAR_LIDARR_API_KEY}
-      - HOMEPAGE_VAR_PROWLARR_API_KEY=${HOMEPAGE_VAR_PROWLARR_API_KEY}
-      - HOMEPAGE_VAR_BAZARR_API_KEY=${HOMEPAGE_VAR_BAZARR_API_KEY}
-      - HOMEPAGE_VAR_QBIT_PASSWORD=${HOMEPAGE_VAR_QBIT_PASSWORD}
     volumes:
       - ${DOCKER_VOLUMES}/homepage:/app/config
       - /var/run/docker.sock:/var/run/docker.sock:ro
