@@ -3,7 +3,7 @@
 > **Full-stack media automation on Proxmox LXC + Docker.**  
 > Pipeline: Jellyseerr → Radarr/Sonarr/Lidarr → Prowlarr → qBittorrent (Gluetun VPN) → Jellyfin.  
 > TRaSH Guides compliant — single `/data` mount, hardlink-based import (zero storage duplication).  
-> **TVheadend IPTV stack** — DVB-C tuner → TVheadend → LG webOS app (EPG, DVR, live TV).
+> **TVheadend IPTV stack** — DVB-C tuner → TVheadend → LG webOS app + Jellyfin Live TV (EPG, DVR, live TV).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![TRaSH Guides](https://img.shields.io/badge/TRaSH-Guides_compliant-brightgreen)](https://trash-guides.info)
@@ -17,15 +17,21 @@
 ```
 CT302 (docker-host) /mnt/mediastore/
 ├── config/               ← per-app config dirs
-└── data/                 ← SINGLE mount for all containers
-    ├── torrents/
-    │   ├── movies/       ← qBittorrent category: radarr
-    │   ├── tv/           ← qBittorrent category: sonarr
-    │   ├── music/        ← qBittorrent category: lidarr
-    │   └── incomplete/
-    ├── movies/           ← Radarr library  (hardlinked from torrents/movies/)
-    ├── tv/               ← Sonarr library  (hardlinked from torrents/tv/)
-    └── music/            ← Lidarr library  (hardlinked from torrents/music/)
+├── data/                 ← SINGLE mount for all containers
+│   ├── torrents/
+│   │   ├── movies/       ← qBittorrent category: radarr
+│   │   ├── tv/           ← qBittorrent category: sonarr
+│   │   ├── music/        ← qBittorrent category: lidarr
+│   │   └── incomplete/
+│   ├── movies/           ← Radarr library  (hardlinked from torrents/movies/)
+│   ├── tv/               ← Sonarr library  (hardlinked from torrents/tv/)
+│   └── music/            ← Lidarr library  (hardlinked from torrents/music/)
+└── recordings/           ← TVheadend DVR felvételek
+    ├── movies/           ← Jellyfin: Filmek könyvtár
+    ├── tvshows/          ← Jellyfin: Sorozatok könyvtár
+    ├── kozelet/          ← Jellyfin: Közélet könyvtár
+    ├── sport/            ← Jellyfin: Sport könyvtár
+    └── egyeb/            ← Jellyfin: Egyéb könyvtár
 ```
 
 ### Container stack
@@ -43,11 +49,11 @@ CT302 (docker-host) /mnt/mediastore/
 | `jellyseerr` | 5055 | Request UI |
 | `homepage` | 3001 | Dashboard |
 | `tdarr` | 8265 | Transcode automation (scheduled) |
-| `tvheadend` | 9981/9982 | IPTV server + DVR + EPG (DVB-C tuner) |
+| `tvheadend` | 9981/9982 | IPTV server + DVR + EPG (DVB-C tuner) ✅ ACTIVE |
 
 ---
 
-## TVheadend IPTV Stack
+## TVheadend IPTV Stack ✅ LIVE
 
 ### Architecture
 
@@ -56,13 +62,14 @@ One kábel (koax)
     ↓
 Koax splitter (1→2)
     ├── LG TV (gyári tuner, CAM kártya)
-    └── Hauppauge WinTV-soloHD (USB, pve-03-ba dugva)
+    └── Hauppauge WinTV-soloHD (USB, pve-03-ba dugva) ✅ ACTIVE
             ↓
        TVheadend (Docker, CT302) — 10.10.40.32:9981
             ↓
        WiFi/LAN
             ↓
-       LG webOS TVheadend app (HTSP port 9982)
+       LG webOS TVheadend app (HTSP port 9982) ✅
+       Jellyfin Live TV (TVheadend plugin) ✅
        + bármely eszköz (telefon, tablet, Kodi)
 ```
 
@@ -83,7 +90,7 @@ services:
       - TZ=Europe/Budapest
     volumes:
       - /opt/tvheadend/config:/config
-      - /opt/tvheadend/recordings:/recordings
+      - /mnt/mediastore/recordings:/recordings
     devices:
       - /dev/dvb:/dev/dvb
     ports:
@@ -125,6 +132,8 @@ A TVheadend webes felületen (**Configuration → Users**):
 
 **Fontos:** Az `Enabled` jelölőnégyzet legyen bepipálva minden bejegyzésnél!
 
+**HTTP Authentication:** Configuration → General → Base → Authentication type → **"Both plain and digest"**
+
 ### EPG beállítása
 
 ```bash
@@ -146,45 +155,83 @@ echo "0 4 * * * root /opt/tvheadend/epg_update.sh" >> /etc/cron.d/tvheadend
 
 TVheadend-ben: **Configuration → Channel/EPG → EPG Grabber Modules** → engedélyezd: **Internal XMLTV: XML file grabber**
 
-### Magyar IPTV playlist (DVB-C tuner nélkül)
+### OTA EPG letiltása (fontos!)
+
+Az EIT (Over-the-air) EPG grabber lassítja a rendszert DVB-C tunernél. Ki kell kapcsolni:
 
 ```bash
-docker exec tvheadend curl -L -s "https://iptv-org.github.io/iptv/index.m3u" | \
-  awk '/\.hu@SD/{found=1} found{print; if(!/^#/) {found=0; next}}' | \
-  sed 's/\.hu@SD/.hu/g' | \
-  sed 's/tvg-id="RTLHarom\.hu"/tvg-id="RTL.HÁROM.hu"/g' | \
-  sed 's/tvg-id="RTLKetto\.hu"/tvg-id="RTL.KETTŐ.hu"/g' | \
-  sed 's/tvg-id="RTLGold\.hu"/tvg-id="RTL.GOLD.hu"/g' | \
-  sed 's/tvg-id="DunaWorld\.hu"/tvg-id="Duna.World.hu"/g' | \
-  sed 's/tvg-id="Duna\.hu"/tvg-id="Duna.TV.hu"/g' \
-  > /opt/tvheadend/config/hungary.m3u
+docker stop tvheadend
+sed -i '/"eit":/,/"priority": 1/{s/"enabled": true/"enabled": false/}' \
+  /opt/tvheadend/config/epggrab/config
+docker start tvheadend
 ```
 
-EPG forrás: `https://epgshare01.online/epgshare01/epg_ripper_HU1.xml.gz`
+### DVB-C hálózat beállítása (One)
 
-### Működő csatornák (IPTV módban)
+```
+1. Configuration → DVB Inputs → Networks → Add → DVB-C Network
+2. Hálózat neve: One DVB-C
+3. Előre meghatározott muxok: Hungary → One
+4. Scan → Map all services → Map services
+5. Tuner: Silicon Labs Si2168 (Hauppauge WinTV-soloHD)
+```
 
-| Csatorna | EPG ID | Státusz |
+### DVR felvételek
+
+```bash
+# Recordings jogosultság beállítása
+chown -R 1000:1000 /mnt/mediastore/recordings/
+chmod -R 775 /mnt/mediastore/recordings/
+```
+
+TVheadend DVR profilok:
+| Profil | Storage path | Csatornák |
 |---|---|---|
-| RTL | RTL.hu | ✅ |
-| TV2 | TV2.hu | ✅ |
-| RTL Három | RTL.HÁROM.hu | ✅ |
-| RTL Kettő | RTL.KETTŐ.hu | ✅ |
-| Sport 1 | Sport1.hu | ✅ |
-| ATV | ATV.hu | ✅ |
-| M2 Petőfi | M2.hu | ✅ |
+| `Tvshows` | `/recordings/tvshows` | RTL, TV2, RTL Három, RTL Kettő |
+| `Sport` | `/recordings/sport` | Sport1, M4 Sport |
+| `Kozelet` | `/recordings/kozelet` | ATV, Hír TV |
+| `Movies` | `/recordings/movies` | Film csatornák |
+| `Egyeb` | `/recordings/egyeb` | Egyéb |
 
-### DVB-C szkennelés (Hauppauge WinTV-soloHD után)
+### Jellyfin Live TV integráció
 
+1. Jellyfin → Dashboard → Plugins → Catalog → **TVHeadend** → telepítés → restart
+2. Plugin beállítások:
+   - TVHeadend IP: `10.10.40.32`
+   - Port: `9981`
+   - Username: `admin`
+   - Password: `admin`
+3. Dashboard → Live TV → TV Guide Data Providers → **XMLTV**
+   - URL: `http://admin:admin@10.10.40.32:9981/xmltv/channels`
+
+### Jellyfin recordings könyvtárak
+
+```bash
+# Jellyfin docker-compose.yml volumes szekciójába:
+- ${RECORDINGS}:/recordings
+
+# .env fájlba:
+RECORDINGS=/mnt/mediastore/recordings
 ```
-1. Dugd be a tunert a pve-03 USB portjába
-2. Ellenőrzés: ls /dev/dvb/
-3. LXC restart: pct restart 302
-4. TVheadend: Configuration → DVB Inputs → TV adapters (meg kell jelennie)
-5. Networks → Add → DVB-C Network
-6. Előre meghatározott muxok: Hungary → One
-7. Scan → Map all services → Map services
-```
+
+### Működő One DVB-C csatornák ✅
+
+| Csatorna | Státusz |
+|---|---|
+| M1 | ✅ |
+| M2 / Petőfi TV | ✅ |
+| DUNA | ✅ |
+| M4 Sport | ✅ |
+| M5 | ✅ |
+| RTL | ✅ |
+| TV2 | ✅ |
+| RTL Kettő | ✅ |
+| Sorozat+ | ✅ |
+| Super TV2 | ✅ |
+| Moziverzum | ✅ |
+| RTL Gold | ✅ |
+| TV4 | ✅ |
+| Hangulat TV | ✅ |
 
 ### Következő lépések
 
@@ -194,10 +241,15 @@ EPG forrás: `https://epgshare01.online/epgshare01/epg_ripper_HU1.xml.gz`
 - [x] EPG beállítása (epgshare01.online HU1)
 - [x] LG webOS app csatlakoztatása
 - [x] Proxmox LXC DVB passthrough előkészítése
-- [x] Hauppauge firmware telepítése
-- [ ] Hauppauge WinTV-soloHD USB tuner bedugása
-- [ ] DVB-C szkennelés One frekvenciákon
+- [x] Hauppauge WinTV-soloHD firmware telepítése
+- [x] Hauppauge WinTV-soloHD USB tuner bedugva és aktív
+- [x] One DVB-C szkennelés és csatornák betöltve
+- [x] DVR felvételek beállítva (/mnt/mediastore/recordings)
+- [x] Jellyfin TVHeadend plugin telepítve
+- [x] Jellyfin recordings könyvtárak hozzáadva
+- [ ] Jellyfin Live TV EPG channel mapping véglegesítése
 - [ ] USB CI modul + CAM kártya (titkosított One csatornákhoz)
+- [ ] DVR profilok hozzárendelése csatornákhoz
 
 ---
 
@@ -207,7 +259,7 @@ EPG forrás: `https://epgshare01.online/epgshare01/epg_ripper_HU1.xml.gz`
 - AMD iGPU on pve-03 host for Jellyfin VA-API transcoding
 - ZFS pool or NFS for `/mnt/mediastore` storage
 - VPN credentials (PIA / Mullvad etc.) for Gluetun
-- (Opcionális) Hauppauge WinTV-soloHD USB DVB-C tuner
+- Hauppauge WinTV-soloHD USB DVB-C tuner ✅
 
 ---
 
@@ -230,9 +282,16 @@ docker compose --env-file .env up -d
 
 Ha az **EPG Grabber Modules** fül hiányzik: **Configuration → General → Base** → pipáld be a **Persistent view level** jelölőnégyzetet → **Save** → oldal újratöltése.
 
-### TVheadend — broadcasts = 0
+### TVheadend — OTA EPG lassítja a rendszert
 
-Az EPG channel ID-knak egyezniük kell az M3U `tvg-id` értékeivel. A fenti playlist generáló script már tartalmazza a szükséges konverziókat.
+DVB-C tunernél az EIT grabber folyamatosan szkenneli az összes muxot. Kapcsold ki SSH-ból (lásd fent).
+
+### TVheadend — Recording Permission Denied
+
+```bash
+chown -R 1000:1000 /mnt/mediastore/recordings/
+chmod -R 775 /mnt/mediastore/recordings/
+```
 
 ### Gluetun healthcheck
 
@@ -250,4 +309,4 @@ lxc.mount.entry: /dev/dri/renderD128 dev/dri/renderD128 none bind,optional,creat
 
 ---
 
-*Tested on: Proxmox VE 7.0/8.3, AMD Ryzen Renoir iGPU, Docker 27.x, TVheadend 4.3-2657*
+*Tested on: Proxmox VE 7.0/8.3, AMD Ryzen Renoir iGPU, Docker 27.x, TVheadend 4.3-2660, Hauppauge WinTV-soloHD*
