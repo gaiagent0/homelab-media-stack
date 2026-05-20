@@ -70,6 +70,7 @@ Koax splitter (1→2)
             ↓
        LG webOS TVheadend app (HTSP port 9982) ✅
        Jellyfin Live TV (TVheadend plugin) ✅
+       Jellyfin Media Player (Windows desktop) ✅
        + bármely eszköz (telefon, tablet, Kodi)
 ```
 
@@ -121,6 +122,15 @@ wget -O /lib/firmware/dvb-tuner-si2157-a30-01.fw \
   "https://github.com/LibreELEC/dvb-firmware/raw/master/firmware/dvb-tuner-si2157-a30-01.fw"
 ```
 
+### VA-API Mesa driver telepítése (pve-03 host) ⚠️ KRITIKUS
+
+**MPEG2 és H264 hardveres dekódoláshoz szükséges — nélküle a Jellyfin Live TV kockás!**
+
+```bash
+apt-get install -y vainfo mesa-va-drivers
+vainfo  # ellenőrzés: VAProfileMPEG2 és VAProfileH264 kell lásson
+```
+
 ### Felhasználók beállítása
 
 A TVheadend webes felületen (**Configuration → Users**):
@@ -129,8 +139,6 @@ A TVheadend webes felületen (**Configuration → Users**):
 |---|---|---|---|---|
 | `admin` | Adminisztrátor | ✅ | ✅ | Advanced, Basic, HTSP |
 | `webos` | LG TV app | ❌ | ❌ | Basic, HTSP |
-
-**Fontos:** Az `Enabled` jelölőnégyzet legyen bepipálva minden bejegyzésnél!
 
 **HTTP Authentication:** Configuration → General → Base → Authentication type → **"Both plain and digest"**
 
@@ -193,7 +201,7 @@ TVheadend DVR profilok:
 | `Movies` | `/recordings/movies` | Film csatornák |
 | `Egyeb` | `/recordings/egyeb` | Egyéb |
 
-### Jellyfin Live TV integráció
+### Jellyfin Live TV integráció ✅
 
 1. Jellyfin → Dashboard → Plugins → Catalog → **TVHeadend** → telepítés → restart
 2. Plugin beállítások:
@@ -201,8 +209,9 @@ TVheadend DVR profilok:
    - Port: `9981`
    - Username: `admin`
    - Password: `admin`
-3. Dashboard → Live TV → TV Guide Data Providers → **XMLTV**
-   - URL: `http://admin:admin@10.10.40.32:9981/xmltv/channels`
+3. Dashboard → Live TV → TV műsorújság-szolgáltatók → **XMLTV**
+   - URL: `https://epgshare01.online/epgshare01/epg_ripper_HU1.xml.gz`
+   - ⚠️ NE használd a TVheadend XMLTV URL-t (`/xmltv/channels`) — az UUID alapú ID-kat exportál ami nem párosítható az EPG adatokkal!
 
 ### Jellyfin recordings könyvtárak
 
@@ -212,6 +221,13 @@ TVheadend DVR profilok:
 
 # .env fájlba:
 RECORDINGS=/mnt/mediastore/recordings
+```
+
+### Jellyfin Media Player (Windows desktop)
+
+Natív TS direct play támogatással — jobb Live TV élmény mint a böngésző:
+```
+https://github.com/jellyfin/jellyfin-media-player/releases/latest
 ```
 
 ### Működő One DVB-C csatornák ✅
@@ -247,7 +263,9 @@ RECORDINGS=/mnt/mediastore/recordings
 - [x] DVR felvételek beállítva (/mnt/mediastore/recordings)
 - [x] Jellyfin TVHeadend plugin telepítve
 - [x] Jellyfin recordings könyvtárak hozzáadva
-- [ ] Jellyfin Live TV EPG channel mapping véglegesítése
+- [x] VA-API Mesa driver telepítve (MPEG2/H264 hardveres dekódolás)
+- [x] Jellyfin Live TV EPG beállítva (epgshare01.online)
+- [x] Jellyfin Media Player Windows desktop telepítve
 - [ ] USB CI modul + CAM kártya (titkosított One csatornákhoz)
 - [ ] DVR profilok hozzárendelése csatornákhoz
 
@@ -293,6 +311,27 @@ chown -R 1000:1000 /mnt/mediastore/recordings/
 chmod -R 775 /mnt/mediastore/recordings/
 ```
 
+### TVheadend — Tuner foglalt (No free adapter)
+
+Ha más eszköz foglalja a tunert, ellenőrizd:
+```bash
+curl -s "http://admin:admin@10.10.40.32:9981/api/status/subscriptions" | python3 -m json.tool
+docker restart jellyfin  # ha a Jellyfin tartja nyitva a streamet
+```
+
+### Jellyfin Live TV — kockás kép (MPEG2 transcode)
+
+```bash
+# pve-03 host-on:
+apt-get install -y mesa-va-drivers
+# Majd Jellyfin Dashboard → Lejátszás → Átkódolás → MPEG2 hardveres dekódolás ✅
+```
+
+### Jellyfin Live TV EPG — UUID alapú ID-k
+
+Ne használd a `http://tvheadend:9981/xmltv/channels` URL-t — UUID alapú channel ID-kat exportál.
+Használd helyette közvetlenül: `https://epgshare01.online/epgshare01/epg_ripper_HU1.xml.gz`
+
 ### Gluetun healthcheck
 
 Ne használd a `condition: service_healthy` feltételt — `condition: service_started` a helyes.
@@ -302,6 +341,10 @@ Ne használd a `condition: service_healthy` feltételt — `condition: service_s
 ## VA-API Hardware Transcoding (AMD Ryzen iGPU)
 
 ```bash
+# pve-03 host:
+apt-get install -y vainfo mesa-va-drivers
+
+# LXC 302 config:
 echo "lxc.cgroup2.devices.allow: c 226:128 rwm
 lxc.mount.entry: /dev/dri/renderD128 dev/dri/renderD128 none bind,optional,create=file" \
   >> /etc/pve/lxc/302.conf
