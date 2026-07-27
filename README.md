@@ -144,6 +144,10 @@ A TVheadend webes felületen (**Configuration → Users**):
 
 ### EPG beállítása
 
+A linuxserver.io TVheadend image beépített `tv_grab_file` grabbere a `/config/data/*.xml` mintára illeszkedő
+**összes** fájlt egyetlen `cat`-tel fűzi össze és úgy adja át a parsernek. Emiatt a `data` mappában
+**kizárólag egyetlen `.xml` fájl lehet** (`guide.xml`) — lásd a lenti "EPG csendben nem importál semmit" szakaszt.
+
 ```bash
 # EPG mappa és letöltő script
 mkdir -p /opt/tvheadend/config/data
@@ -157,11 +161,74 @@ EOF
 chmod +x /opt/tvheadend/epg_update.sh
 /opt/tvheadend/epg_update.sh
 
-# Napi automatikus frissítés
-echo "0 4 * * * root /opt/tvheadend/epg_update.sh" >> /etc/cron.d/tvheadend
+# Napi automatikus frissítés (cron.d — külön fájl, nem echo >> egy meglévőbe!)
+echo "0 4 * * * root /opt/tvheadend/epg_update.sh" > /etc/cron.d/tvheadend
+chmod 644 /etc/cron.d/tvheadend
 ```
 
 TVheadend-ben: **Configuration → Channel/EPG → EPG Grabber Modules** → engedélyezd: **Internal XMLTV: XML file grabber**
+
+Beállítás után az EPG-t manuálisan is be lehet tölteni azonnal a webUI-n a **"Re-run Internal EPG Grabbers"**
+gombbal (Configuration → Channel/EPG → EPG Grabber Modules), vagy API-n keresztül:
+
+```bash
+curl -s -X POST "http://10.10.40.32:9981/api/epggrab/internal/rerun" -d "rerun=1"
+```
+
+### ⚠️ EPG csendben nem importál semmit (channels OK, broadcasts=0)
+
+**Tünet:** a log azt mutatja, hogy a grab lefutott és a csatornákat felismerte, de a műsoridő-adatokat nem:
+
+```
+xmltv: /usr/bin/tv_grab_file: grab took 0 seconds
+xmltv: /usr/bin/tv_grab_file: parse took 0 seconds
+xmltv: /usr/bin/tv_grab_file:  channels   tot=  193 new=    0 mod=    3
+xmltv: /usr/bin/tv_grab_file:  broadcasts tot=    0 new=    0 mod=    0   ← hiba!
+```
+
+**Ok:** a `tv_grab_file` script tartalma (linuxserver.io image):
+
+```bash
+if (( $# < 1 )); then
+  cat /config/data/*.xml
+  exit 0
+fi
+```
+
+Ha **egynél több** `.xml` fájl van a `/config/data/` mappában (pl. egy régi, kézzel odamásolt fájl a napi
+`guide.xml` mellett), a `cat` mindet összefűzi. Két `<?xml ...?>` deklaráció és két `<tv>` gyökérelem kerül
+egymás mellé egy "dokumentumba" — ez érvénytelen XML. A TVheadend XML parsere ilyenkor csendben csak az első
+`<tv>...</tv>` blokkot (jellemzően a `<channel>` lista, ami elöl van a fájlban) dolgozza fel, a később következő
+`<programme>` elemeket eldobja, hibaüzenet vagy warning nélkül.
+
+**Megoldás:**
+
+```bash
+# 1. Ellenőrizd, hány XML van a data mappában — pontosan 1-nek kell lennie
+ls -la /opt/tvheadend/config/data/
+
+# 2. Töröld a fölösleges/régi fájl(oka)t, csak a guide.xml maradjon
+rm -f /opt/tvheadend/config/data/epg_hu.xml   # vagy bármi más régi fájl
+
+# 3. Ellenőrzés: összefűzve is pontosan 1 <?xml> és 1 <tv> gyökérelem legyen
+docker exec tvheadend sh -c "cat /config/data/*.xml | grep -c '<?xml'"   # → 1
+docker exec tvheadend sh -c "cat /config/data/*.xml | grep -c '<tv '"    # → 1
+
+# 4. Re-run Internal EPG Grabbers (webUI gomb, vagy API)
+curl -s -X POST "http://10.10.40.32:9981/api/epggrab/internal/rerun" -d "rerun=1"
+```
+
+Ha a fenti után is `broadcasts=0` marad, az EPG adatbázis lehet korrupt egy korábbi hibás import miatt —
+teljes reset szükséges:
+
+```bash
+docker stop tvheadend
+rm -f /opt/tvheadend/config/epgdb.v3
+find /opt/tvheadend/config/epggrab/xmltv/channels/ -type f -delete
+docker start tvheadend
+# várj ~20mp, majd Re-run Internal EPG Grabbers kétszer egymás után
+# (1. futás: csak csatornafelismerés, 2. futás: tényleges programadat)
+```
 
 ### OTA EPG letiltása (fontos!)
 
@@ -200,6 +267,17 @@ TVheadend DVR profilok:
 | `Kozelet` | `/recordings/kozelet` | ATV, Hír TV |
 | `Movies` | `/recordings/movies` | Film csatornák |
 | `Egyeb` | `/recordings/egyeb` | Egyéb |
+
+**Árva DVR bejegyzések (fájl törölve, adatbázis-rekord megmaradt):** induláskor
+`dvr: unable to stat file '...' : No such file or directory` hibát okoznak a logban. Azonosítás és törlés:
+
+```bash
+# Listázd a DVR entryket, keresd meg amelyiknek nincs meg a fájlja a /mnt/mediastore/recordings alatt
+curl -s "http://10.10.40.32:9981/api/dvr/entry/grid?limit=999" | python3 -m json.tool
+
+# A hibás uuid-k törlése
+curl -s -X POST "http://10.10.40.32:9981/api/dvr/entry/remove" -d "uuid=<UUID>"
+```
 
 ### Jellyfin Live TV integráció ✅
 
@@ -266,6 +344,7 @@ https://github.com/jellyfin/jellyfin-media-player/releases/latest
 - [x] VA-API Mesa driver telepítve (MPEG2/H264 hardveres dekódolás)
 - [x] Jellyfin Live TV EPG beállítva (epgshare01.online)
 - [x] Jellyfin Media Player Windows desktop telepítve
+- [x] EPG cron aktiválva (`/etc/cron.d/tvheadend`, napi 04:00)
 - [ ] USB CI modul + CAM kártya (titkosított One csatornákhoz)
 - [ ] DVR profilok hozzárendelése csatornákhoz
 
@@ -303,6 +382,11 @@ Ha az **EPG Grabber Modules** fül hiányzik: **Configuration → General → Ba
 ### TVheadend — OTA EPG lassítja a rendszert
 
 DVB-C tunernél az EIT grabber folyamatosan szkenneli az összes muxot. Kapcsold ki SSH-ból (lásd fent).
+
+### TVheadend — EPG csendben nem importál semmit (channels OK, broadcasts=0)
+
+Lásd fent, "EPG beállítása" szakasz — leggyakoribb ok: **több `.xml` fájl a `/config/data/` mappában**,
+amit a `tv_grab_file` egyetlen érvénytelen dokumentummá fűz össze. Csak 1 fájl (`guide.xml`) lehet ott.
 
 ### TVheadend — Recording Permission Denied
 
