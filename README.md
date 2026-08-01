@@ -420,6 +420,23 @@ Használd helyette közvetlenül: `https://epgshare01.online/epgshare01/epg_ripp
 
 Ne használd a `condition: service_healthy` feltételt — `condition: service_started` a helyes.
 
+### qBittorrent WebUI nem elérhető (connection reset) Gluetun újraindítás után
+
+Ha a VPN kapcsolat rendben felépül (log: `Initialization Sequence Completed`, helyes IP), de a WebUI portra (8080) érkező kapcsolatok `connection reset`-tel végződnek, hiányzik a killswitch firewall engedélye a portra. Add hozzá a Gluetun environment blokkjához:
+
+```
+- FIREWALL_VPN_INPUT_PORTS=8080
+- FIREWALL_INPUT_PORTS=8080
+```
+
+`FIREWALL_VPN_INPUT_PORTS` a `tun0` interfészen, `FIREWALL_INPUT_PORTS` a docker bridge (`eth0`) interfészen engedi be a portot — mindkettő kell, mert a host port-publish forgalom az `eth0`-n érkezik.
+
+Ha a Gluetun konténert `docker compose up -d gluetun`-nal recreate-eled, a `network_mode: service:gluetun`-t használó qBittorrent konténer hálózati namespace-e is megszakad — utána azt is újra kell indítani:
+
+```
+docker compose up -d qbittorrent
+```
+
 ---
 
 ## VA-API Hardware Transcoding (AMD Ryzen iGPU)
