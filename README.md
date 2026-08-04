@@ -230,6 +230,87 @@ docker start tvheadend
 # (1. futás: csak csatornafelismerés, 2. futás: tényleges programadat)
 ```
 
+### ⚠️ Hiányos EPG — sok " HD" végű csatornának nincs műsorújsága
+
+**Tünet:** az EPG import sikeres (`broadcasts new > 0`), de csak a csatornák egy része (pl. 29 a 101-ből)
+kap tényleges műsoradatot. A hiányzók jellemzően a `" HD"` végződésű csatornanevek (ATV HD, TV2 HD, RTL HD,
+M4 Sport HD, DUNA HD stb.) — miközben a nem-HD csatornáknál (ATV, RTL, TV2) minden rendben.
+
+**Ok:** az epgshare01 HU1 forrás a legtöbb csatornát **HD jelző nélkül** listázza (pl. `"ATV"`, `"m2 HD"`,
+`"Duna TV"`), a `tv_grab_file` fuzzy name-matchingje pedig kis/nagybetűre és a saját TVheadend-csatornaneved
+pontos formájára (`"ATV HD"`, `"M2 / Petőfi TV HD"`, `"DUNA HD"`) érzékeny — a kettő nem mindig párosul
+automatikusan.
+
+**Megoldás:** a letöltés után egy Python post-processzáló minden nem-HD `<channel>` blokkot (és a hozzá
+tartozó `<programme>` elemeket) duplikál egy `" HD"` toldalékos ID-vel és display-name-mel, hogy a fuzzy
+matcher a helyi HD-elnevezésű csatornákra is ráilljen:
+
+```bash
+cat > /opt/tvheadend/hd_dedupe_epg.py << 'PYEOF'
+#!/usr/bin/env python3
+"""guide.xml minden nem-HD csatornajahoz letrehoz egy ' HD' duplikatumot
+(channel + programme elemek), hogy a tv_grab_file fuzzy matching-je
+a helyi HD-elnevezesu csatornakra is illeszkedjen."""
+import re
+
+GUIDE = '/opt/tvheadend/config/data/guide.xml'
+
+with open(GUIDE, 'r', encoding='utf-8') as f:
+    content = f.read()
+
+channel_blocks = re.findall(r'<channel id="[^"]+">.*?</channel>', content, re.DOTALL)
+
+extra_channels = []
+extra_programmes_map = {}
+
+for block in channel_blocks:
+    id_m = re.search(r'<channel id="([^"]+)">', block)
+    name_m = re.search(r'<display-name[^>]*>([^<]+)</display-name>', block)
+    if not id_m or not name_m:
+        continue
+    orig_id = id_m.group(1)
+    orig_name = name_m.group(1)
+    if 'HD' in orig_name.upper():
+        continue
+    new_id = orig_id + '.HD'
+    new_name = orig_name + ' HD'
+    new_block = block.replace(f'<channel id="{orig_id}">', f'<channel id="{new_id}">', 1)
+    new_block = new_block.replace(f'>{orig_name}<', f'>{new_name}<', 1)
+    extra_channels.append(new_block)
+    extra_programmes_map[orig_id] = new_id
+
+extra_programmes = []
+for orig_id, new_id in extra_programmes_map.items():
+    pattern = re.compile(
+        r'<programme([^>]*)channel="' + re.escape(orig_id) + r'"([^>]*)>(.*?)</programme>',
+        re.DOTALL
+    )
+    for m in pattern.finditer(content):
+        new_prog = f'<programme{m.group(1)}channel="{new_id}"{m.group(2)}>{m.group(3)}</programme>'
+        extra_programmes.append(new_prog)
+
+insertion = ''.join(extra_channels) + ''.join(extra_programmes)
+new_content = content.replace('</tv>', insertion + '</tv>')
+
+with open(GUIDE, 'w', encoding='utf-8') as f:
+    f.write(new_content)
+
+print(f"Extra HD channel: {len(extra_channels)}, extra HD programme: {len(extra_programmes)}")
+PYEOF
+
+# Fűzd hozzá az epg_update.sh végéhez, hogy minden napi frissítés után lefusson:
+echo "python3 /opt/tvheadend/hd_dedupe_epg.py" >> /opt/tvheadend/epg_update.sh
+chown 1000:1000 /opt/tvheadend/config/data/guide.xml
+
+# Ezután Re-run Internal EPG Grabbers KÉTSZER (1. csatorna-felismerés, 2. tartalom),
+# szükség esetén teljes EPG reset is (lásd fenti szakasz)
+```
+
+**Megjegyzés:** néhány csatorlnál (pl. DUNA HD, M2/Petőfi TV HD, M4 Sport HD) a névformátum annyira eltér
+(`"Duna TV"`, `"m2 HD"`, `"m4"`), hogy még a HD-dedupe után sem párosul automatikusan — ezekhez kézi
+csatorna-ID alias szükséges a scriptben. A helyi/kábeltévés csatornák egy része (pl. Kispest TV, Buda TV,
+felnőtt csatornák) pedig **nincs is benne** az epgshare01 HU1 forrásban — ezekhez nincs ingyenes magyar EPG.
+
 ### OTA EPG letiltása (fontos!)
 
 Az EIT (Over-the-air) EPG grabber lassítja a rendszert DVB-C tunernél. Ki kell kapcsolni:
@@ -241,6 +322,86 @@ sed -i '/"eit":/,/"priority": 1/{s/"enabled": true/"enabled": false/}' \
 docker start tvheadend
 ```
 
+### ⚠️ Csatornák nem indulnak el ("No input detected") — Idle Scan
+
+**Tünet:** a webUI elérhető, a csatornalista és az EPG is megvan, de bármelyik csatorna lejátszása
+elakad/időtúllépést dob. A logban:
+
+```
+subscription: NNNN: service instance is bad, reason: No input detected
+subscription: NNNN: No input source available for subscription "HTTP" to channel "..."
+```
+
+**Ok:** a DVB-C hálózat (**Configuration → DVB Inputs → Networks**) `idlescan` beállítása be van kapcsolva.
+Ez azt jelenti, hogy amikor senki sem néz semmit, a TVheadend **folyamatosan, automatikusan újra-szkenneli**
+az összes mux-ot a háttérben (a logban percenként visszatérő `tuning`/`scan complete` ciklusok formájában).
+Egyetlen fizikai tunerrel ez azt okozza, hogy amikor ténylegesen elindítanál egy csatornát, a tuner épp
+egy másik mux-on van elfoglalva a háttér-scan miatt, és a kérés időtúllépést kap.
+
+**Megoldás:** kapcsold ki az Idle Scan-t minden hálózaton:
+
+```bash
+# Hálózat UUID-k lekérése
+curl -s "http://10.10.40.32:9981/api/mpegts/network/grid?limit=10" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for n in d.get('entries',[]):
+    print(n.get('networkname'), '|', n.get('uuid'))
+"
+
+# Kikapcsolás hálózatonként
+curl -s -X POST "http://10.10.40.32:9981/api/idnode/save" \
+  -d 'node={"uuid":"<NETWORK_UUID>","idlescan":false}'
+```
+
+Vagy webUI-n: **Configuration → DVB Inputs → Networks** → hálózat kiválasztása → **Idle Scan** pipa kikapcsolása.
+
+### ⚠️ Csatornák nem indulnak el CT302/pve-03 restart után — beragadt USB DVB driver
+
+**Tünet:** a webUI elérhető, a tuner frontend jó jelet mutat (`signal`/`snr` rendben az
+`/api/status/inputs` API-ban), mégis **minden** csatorna egyformán, pontosan ~6 másodperc után
+`"No input detected"` hibával elszáll — függetlenül attól, melyik mux-on van. Jellemzően több egymást
+követő `pct stop`/`pct start` (CT302 restart) vagy USB re-enumerálódás (`FE_READ_STATUS error No such
+device` a logban) után jelentkezik.
+
+**Ok:** a kernel-szintű USB DVB driverek (`si2168`, `si2157`, `em28xx`) "megragadnak" egy hibás belső
+állapotban a pve-03 hoszton — a `/dev/dvb/adapter0/` device node-ok újra létrejönnek, de a driver maga
+nem áll helyre önmagától egy egyszerű docker/LXC restarttal.
+
+**Megoldás:** explicit USB driver unbind/bind a pve-03 hoszton, utána teljes CT302 restart:
+
+```bash
+# pve-03 host-on:
+# 1. TVheadend leállítása
+pct exec 302 -- docker stop tvheadend
+
+# 2. USB eszköz azonosítása (Hauppauge soloHD = 2040:8268)
+lsusb | grep -i hauppauge
+# pl. "Bus 004 Device 056: ID 2040:8268 Hauppauge soloHD"
+# a bus/port útvonal (pl. 4-1) az lsusb -t vagy /sys/bus/usb/drivers/usb/ alatt látszik
+
+# 3. driver unbind/bind (X-Y = a tényleges usb port útvonal, pl. 4-1)
+echo "4-1" > /sys/bus/usb/drivers/usb/unbind
+sleep 3
+echo "4-1" > /sys/bus/usb/drivers/usb/bind
+sleep 5
+
+# 4. dvb node ellenőrzés a hoszton
+ls -la /dev/dvb/adapter0/
+
+# 5. CT302 teljes restart (a bind-mount frissen épül fel)
+pct stop 302
+sleep 5
+pct start 302
+sleep 25
+
+# 6. TVheadend indítás
+pct exec 302 -- bash -c "cd /opt/tvheadend && docker compose up -d"
+```
+
+Utána érdemes az **Idle Scan**-t is kikapcsolni (lásd fent), mert az szintén hozzájárulhat ehhez a
+jelenséghez tartós szkennelési terheléssel.
+
 ### DVB-C hálózat beállítása (One)
 
 ```
@@ -249,6 +410,7 @@ docker start tvheadend
 3. Előre meghatározott muxok: Hungary → One
 4. Scan → Map all services → Map services
 5. Tuner: Silicon Labs Si2168 (Hauppauge WinTV-soloHD)
+6. Idle Scan: KIKAPCSOLVA (lásd fenti "Csatornák nem indulnak el" szakasz)
 ```
 
 ### DVR felvételek
@@ -345,8 +507,11 @@ https://github.com/jellyfin/jellyfin-media-player/releases/latest
 - [x] Jellyfin Live TV EPG beállítva (epgshare01.online)
 - [x] Jellyfin Media Player Windows desktop telepítve
 - [x] EPG cron aktiválva (`/etc/cron.d/tvheadend`, napi 04:00)
+- [x] HD-csatornák EPG dedupe scriptje (`hd_dedupe_epg.py`)
+- [x] Idle Scan kikapcsolva mindkét DVB-C hálózaton
 - [ ] USB CI modul + CAM kártya (titkosított One csatornákhoz)
 - [ ] DVR profilok hozzárendelése csatornákhoz
+- [ ] DUNA HD / M2 HD / M4 Sport HD EPG kézi channel-alias
 
 ---
 
@@ -387,6 +552,17 @@ DVB-C tunernél az EIT grabber folyamatosan szkenneli az összes muxot. Kapcsold
 
 Lásd fent, "EPG beállítása" szakasz — leggyakoribb ok: **több `.xml` fájl a `/config/data/` mappában**,
 amit a `tv_grab_file` egyetlen érvénytelen dokumentummá fűz össze. Csak 1 fájl (`guide.xml`) lehet ott.
+
+### TVheadend — Hiányos EPG (HD csatornáknak nincs műsorújsága)
+
+Lásd fent, "Hiányos EPG" szakasz — `hd_dedupe_epg.py` script duplikálja a nem-HD forrás-csatornákat
+HD változatra is, hogy a fuzzy name-matching megtalálja őket.
+
+### TVheadend — Csatornák nem indulnak el ("No input detected")
+
+Két lehetséges ok, lásd fent részletesen:
+1. **Idle Scan bekapcsolva** → kapcsold ki mindkét hálózaton (`idlescan: false`)
+2. **Beragadt USB DVB driver** restart(ok) után → USB unbind/bind + CT302 restart
 
 ### TVheadend — Recording Permission Denied
 
