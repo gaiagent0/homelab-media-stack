@@ -402,6 +402,83 @@ pct exec 302 -- bash -c "cd /opt/tvheadend && docker compose up -d"
 Utána érdemes az **Idle Scan**-t is kikapcsolni (lásd fent), mert az szintén hozzájárulhat ehhez a
 jelenséghez tartós szkennelési terheléssel.
 
+### ⚠️ Csak a csatornák töredéke ("élő") jelenik meg — nincs "Map services" végrehajtva minden mux-on
+
+**Tünet:** a `Configuration → DVB Inputs → Multiplexes` alatt sok mux-nál a **Services** oszlopban van
+szám (pl. 8-17), de a **Channels** oszlop 0 — vagyis a mux-on talált szolgáltatások **soha nem lettek
+csatornává mappelve**. Ez a Live TV listában (Jellyfin/webOS) jóval kevesebb csatornaként jelenik meg,
+mint amennyi ténylegesen fogható lenne (pl. csak ~28 a 100+ potenciálisból).
+
+**Ok:** a kezdeti "Map services" (Configuration → DVB Inputs → Services → Map services) csak részlegesen
+futott le — jellemzően azért, mert a mux-scan több lépésben, megszakításokkal (restartok, USB
+re-enumerálódás) történt, és a webUI-s "Map all services" nem lett újra lefuttatva minden mux felfedezése
+után.
+
+**Diagnózis — hiányzó mappelés keresése:**
+
+```bash
+# Mux-onkénti szolgáltatás- vs csatornaszám összevetés — svc>0 de chn=0 = hiányzó mappelés
+curl -s "http://10.10.40.32:9981/api/mpegts/mux/grid?limit=999" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for m in d['entries']:
+    if m.get('num_svc',0) > 0 and m.get('num_chn',0) == 0:
+        print(m['name'], '| svc:', m['num_svc'])
+"
+```
+
+**Megoldás:** a webUI-s "Map all services" (Configuration → DVB Inputs → Services → jelöld ki az érintett
+szolgáltatásokat → Map services) a legmegbízhatóbb — a dokumentált `service/mapper/save` API hivatalosan
+**"Untested"**, ezért API-ból inkább a `channel/create` végpontot érdemes használni, ami stabil és
+dokumentált:
+
+```bash
+python3 << 'PYEOF'
+import urllib.request, urllib.parse, json
+
+BASE = "http://10.10.40.32:9981"
+
+# Gyűjtsd ki a nem titkosított, csatorna nélküli szolgáltatásokat:
+req = urllib.request.urlopen(f"{BASE}/api/mpegts/service/grid?limit=999", timeout=10)
+services = json.loads(req.read())['entries']
+todo = [(s['uuid'], s['svcname']) for s in services if not s.get('encrypted') and not s.get('channel')]
+
+ok = 0
+for svc_uuid, name in todo:
+    conf = {"enabled": True, "name": name, "services": [svc_uuid], "epgauto": True}
+    data = urllib.parse.urlencode({"conf": json.dumps(conf)}).encode()
+    req = urllib.request.Request(f"{BASE}/api/channel/create", data=data, method="POST")
+    try:
+        urllib.request.urlopen(req, timeout=8)
+        ok += 1
+    except Exception as e:
+        print(f"FAIL: {name} - {e}")
+
+print(f"Kész: {ok}/{len(todo)} csatorna létrehozva")
+PYEOF
+
+# Utána EPG re-run, hogy az új csatornák is kapjanak műsorújságot:
+curl -s -X POST "http://10.10.40.32:9981/api/epggrab/internal/rerun" -d "rerun=1"
+```
+
+**Fontos — nem minden mux egyformán jó jelű:** a mappelés után néhány mux-on a tuner nem tud stabilan
+lock-ot tartani (a `/api/status/inputs` API `signal`/`snr` mezője `0` marad, streamelés `"No input
+detected"` hibával elszáll, míg más mux-oknál -37..-50 dBm közti jó jel és 26-32 dB SNR mérhető). Ez
+**valós, mux-specifikus jelprobléma**, nem szoftverhiba — a csatorna-bejegyzés ettől függetlenül
+létrehozható, csak amíg a jel nem stabilizálódik (esetleg kábelezés/splitter ellenőrzésével), addig
+"No input detected"-et fog dobni. Teszteld mux-onként:
+
+```bash
+# Adott csatorna signal/snr tesztje (indíts egy háttér-streamet, majd nézd a state-et)
+(timeout 6 curl -s --max-time 5 "http://10.10.40.32:9981/stream/channel/<CHANNEL_UUID>" -o /dev/null &)
+sleep 3
+curl -s "http://10.10.40.32:9981/api/status/inputs" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for e in d.get('entries',[]): print('signal:', e.get('signal'), '| snr:', e.get('snr'))
+"
+```
+
 ### DVB-C hálózat beállítása (One)
 
 ```
@@ -411,6 +488,8 @@ jelenséghez tartós szkennelési terheléssel.
 4. Scan → Map all services → Map services
 5. Tuner: Silicon Labs Si2168 (Hauppauge WinTV-soloHD)
 6. Idle Scan: KIKAPCSOLVA (lásd fenti "Csatornák nem indulnak el" szakasz)
+7. Minden mux felfedezése/módosulása után FUTTASD ÚJRA a "Map all services"-t —
+   lásd fenti "Csak a csatornák töredéke élő" szakasz
 ```
 
 ### DVR felvételek
@@ -488,6 +567,7 @@ https://github.com/jellyfin/jellyfin-media-player/releases/latest
 | RTL Gold | ✅ |
 | TV4 | ✅ |
 | Hangulat TV | ✅ |
+| CNN, Discovery Channel, TLC, Disney Channel, Cartoon Network, Nickelodeon, Nat Geo HD, +40 további | ⚠️ csatorna létrehozva, néhány mux (362MHz, 370MHz) gyenge jelű — lásd "Csak a csatornák töredéke élő" |
 
 ### Következő lépések
 
@@ -509,9 +589,11 @@ https://github.com/jellyfin/jellyfin-media-player/releases/latest
 - [x] EPG cron aktiválva (`/etc/cron.d/tvheadend`, napi 04:00)
 - [x] HD-csatornák EPG dedupe scriptje (`hd_dedupe_epg.py`)
 - [x] Idle Scan kikapcsolva mindkét DVB-C hálózaton
+- [x] Hiányzó "Map services" pótlása — 46 új csatorna (`channel/create` API)
 - [ ] USB CI modul + CAM kártya (titkosított One csatornákhoz)
 - [ ] DVR profilok hozzárendelése csatornákhoz
 - [ ] DUNA HD / M2 HD / M4 Sport HD EPG kézi channel-alias
+- [ ] 362MHz és 370MHz mux gyenge jelének kivizsgálása (kábelezés/splitter?)
 
 ---
 
@@ -560,9 +642,15 @@ HD változatra is, hogy a fuzzy name-matching megtalálja őket.
 
 ### TVheadend — Csatornák nem indulnak el ("No input detected")
 
-Két lehetséges ok, lásd fent részletesen:
+Három lehetséges ok, lásd fent részletesen:
 1. **Idle Scan bekapcsolva** → kapcsold ki mindkét hálózaton (`idlescan: false`)
 2. **Beragadt USB DVB driver** restart(ok) után → USB unbind/bind + CT302 restart
+3. **Gyenge jelű mux** (signal/snr = 0 az adott mux-on) → fizikai kábelezés/splitter probléma, nem szoftverhiba
+
+### TVheadend — Csak a csatornák töredéke jelenik meg élőként
+
+Lásd fent, "Csak a csatornák töredéke élő" szakasz — a `Map services` nem futott le minden mux-on,
+`svc>0` de `chn=0` a `mpegts/mux/grid` API-ban. Pótlás a `channel/create` API-val tömegesen.
 
 ### TVheadend — Recording Permission Denied
 
