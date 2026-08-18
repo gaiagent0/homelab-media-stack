@@ -157,6 +157,7 @@ cat > /opt/tvheadend/epg_update.sh << 'EOF'
 curl -s -L "https://epgshare01.online/epgshare01/epg_ripper_HU1.xml.gz" \
   | gunzip > /opt/tvheadend/config/data/guide.xml
 sed -i '/<!DOCTYPE/d' /opt/tvheadend/config/data/guide.xml
+python3 /opt/tvheadend/hd_dedupe_epg.py
 EOF
 chmod +x /opt/tvheadend/epg_update.sh
 /opt/tvheadend/epg_update.sh
@@ -165,6 +166,11 @@ chmod +x /opt/tvheadend/epg_update.sh
 echo "0 4 * * * root /opt/tvheadend/epg_update.sh" > /etc/cron.d/tvheadend
 chmod 644 /etc/cron.d/tvheadend
 ```
+
+⚠️ **A `python3 .../hd_dedupe_epg.py` sor kritikus** — ha ez hiányzik a scriptből (pl. mert valaki felülírta
+kézzel, vagy egy korábbi verzió maradt aktív), a napi 04:00-s cron a friss `guide.xml`-t a HD-dedupe/alias
+nélküli, "csupasz" forrásra cseréli, és a HD-végződésű + alias csatornák EPG-je egyik napról a másikra eltűnik.
+Mindig ellenőrizd `cat /opt/tvheadend/epg_update.sh`-val, hogy a hívás a helyén van-e egy frissítés után.
 
 TVheadend-ben: **Configuration → Channel/EPG → EPG Grabber Modules** → engedélyezd: **Internal XMLTV: XML file grabber**
 
@@ -230,27 +236,33 @@ docker start tvheadend
 # (1. futás: csak csatornafelismerés, 2. futás: tényleges programadat)
 ```
 
-### ⚠️ Hiányos EPG — sok " HD" végű csatornának nincs műsorújsága
+### ⚠️ Hiányos EPG — " HD" végű és eltérő nevű csatornáknak nincs műsorújsága
 
-**Tünet:** az EPG import sikeres (`broadcasts new > 0`), de csak a csatornák egy része (pl. 29 a 101-ből)
-kap tényleges műsoradatot. A hiányzók jellemzően a `" HD"` végződésű csatornanevek (ATV HD, TV2 HD, RTL HD,
-M4 Sport HD, DUNA HD stb.) — miközben a nem-HD csatornáknál (ATV, RTL, TV2) minden rendben.
+**Tünet:** az EPG import sikeres (`broadcasts new > 0`), de csak a csatornák egy része kap tényleges
+műsoradatot. A hiányzók két csoportba esnek:
 
-**Ok:** az epgshare01 HU1 forrás a legtöbb csatornát **HD jelző nélkül** listázza (pl. `"ATV"`, `"m2 HD"`,
-`"Duna TV"`), a `tv_grab_file` fuzzy name-matchingje pedig kis/nagybetűre és a saját TVheadend-csatornaneved
-pontos formájára (`"ATV HD"`, `"M2 / Petőfi TV HD"`, `"DUNA HD"`) érzékeny — a kettő nem mindig párosul
-automatikusan.
+1. **`" HD"` végű csatornanevek** (ATV HD, TV2 HD, RTL HD stb.) — a forrás a legtöbb csatornát HD jelző
+   nélkül listázza (pl. `"ATV"`), a `tv_grab_file` fuzzy name-matchingje kis/nagybetűre és a pontos
+   TVheadend-névre érzékeny, ezért nem párosul automatikusan a `" HD"` végű változattal.
+2. **Erősen eltérő névformátumú csatornák** (DUNA HD, M2/Petőfi TV HD, M4 Sport HD, DUNA W/M4 Sport+ HD,
+   M1 HD, M5 HD) — a forrásban `"Duna TV"`, `"m2 HD"`, `"m4"`, `"Duna World"`, `"m1 HD"`, `"m5"` néven
+   szerepelnek, ami túlságosan eltér a TVheadend-beli csatornanevedtől ahhoz, hogy a `" HD"` toldalékos
+   dedupe (1. pont) megtalálja — ezeknél **explicit alias** kell.
 
-**Megoldás:** a letöltés után egy Python post-processzáló minden nem-HD `<channel>` blokkot (és a hozzá
-tartozó `<programme>` elemeket) duplikál egy `" HD"` toldalékos ID-vel és display-name-mel, hogy a fuzzy
-matcher a helyi HD-elnevezésű csatornákra is ráilljen:
+**Megoldás:** a letöltés után egy Python post-processzáló (a) minden nem-HD `<channel>` blokkot duplikál
+`" HD"` toldalékkal, (b) egy explicit `ALIASES` szótár alapján további csatorna-klónokat hoz létre a
+forrás channel ID-ről a te pontos TVheadend-csatornanevedre. Mindkettő a hozzá tartozó `<programme>`
+elemeket is átmásolja az új ID-re:
 
 ```bash
 cat > /opt/tvheadend/hd_dedupe_epg.py << 'PYEOF'
 #!/usr/bin/env python3
 """guide.xml minden nem-HD csatornajahoz letrehoz egy ' HD' duplikatumot
 (channel + programme elemek), hogy a tv_grab_file fuzzy matching-je
-a helyi HD-elnevezesu csatornakra is illeszkedjen."""
+a helyi HD-elnevezesu csatornakra is illeszkedjen.
+Emellett explicit alias-channeleket is letrehoz azokhoz a TVheadend
+csatornanevekhez, amik nevformatuma tul elter a forrastol a fuzzy
+matchinghez (pl. 'M2 / Petofi TV HD', 'DUNA HD', 'M4 Sport HD')."""
 import re
 
 GUIDE = '/opt/tvheadend/config/data/guide.xml'
@@ -263,6 +275,7 @@ channel_blocks = re.findall(r'<channel id="[^"]+">.*?</channel>', content, re.DO
 extra_channels = []
 extra_programmes_map = {}
 
+# --- 1. altalanos HD dedupe ---
 for block in channel_blocks:
     id_m = re.search(r'<channel id="([^"]+)">', block)
     name_m = re.search(r'<display-name[^>]*>([^<]+)</display-name>', block)
@@ -279,6 +292,31 @@ for block in channel_blocks:
     extra_channels.append(new_block)
     extra_programmes_map[orig_id] = new_id
 
+# --- 2. explicit alias-channelek: forras-id -> pontos TVheadend csatornanev ---
+# Bővítsd ezt a szótárt, ha újabb erősen-eltérő-nevű csatornát találsz.
+ALIASES = {
+    'm1.HD.hu':        'M1 HD',
+    'm2.HD.hu':        'M2 / Petőfi TV HD',
+    'Duna.TV.hu':      'DUNA HD',
+    'm4.hu':           'M4 Sport HD',
+    'Duna.World.hu':   'DUNA W/M4 Sport+ HD',
+    'm5.hu':           'M5 HD',
+}
+
+for src_id, alias_name in ALIASES.items():
+    src_block_m = re.search(rf'<channel id="{re.escape(src_id)}">.*?</channel>', content, re.DOTALL)
+    if not src_block_m:
+        print(f"SKIP (forras channel nem talalhato): {src_id}")
+        continue
+    src_block = src_block_m.group(0)
+    alias_id = src_id + '.alias'
+    new_block = re.sub(r'<channel id="[^"]+">', f'<channel id="{alias_id}">', src_block, count=1)
+    new_block = re.sub(r'<display-name[^>]*>[^<]+</display-name>',
+                        f'<display-name>{alias_name}</display-name>', new_block, count=1)
+    extra_channels.append(new_block)
+    extra_programmes_map[src_id] = alias_id
+
+# --- programme duplikalas mindegyik mappelt (orig -> uj) parhoz ---
 extra_programmes = []
 for orig_id, new_id in extra_programmes_map.items():
     pattern = re.compile(
@@ -295,10 +333,11 @@ new_content = content.replace('</tv>', insertion + '</tv>')
 with open(GUIDE, 'w', encoding='utf-8') as f:
     f.write(new_content)
 
-print(f"Extra HD channel: {len(extra_channels)}, extra HD programme: {len(extra_programmes)}")
+print(f"Extra HD channel: {len(extra_channels)}, extra programme (HD+alias): {len(extra_programmes)}")
 PYEOF
 
-# Fűzd hozzá az epg_update.sh végéhez, hogy minden napi frissítés után lefusson:
+# Fűzd hozzá az epg_update.sh végéhez, hogy minden napi frissítés után lefusson
+# (lásd fent az "EPG beállítása" szakaszban a teljes epg_update.sh-t):
 echo "python3 /opt/tvheadend/hd_dedupe_epg.py" >> /opt/tvheadend/epg_update.sh
 chown 1000:1000 /opt/tvheadend/config/data/guide.xml
 
@@ -306,10 +345,14 @@ chown 1000:1000 /opt/tvheadend/config/data/guide.xml
 # szükség esetén teljes EPG reset is (lásd fenti szakasz)
 ```
 
-**Megjegyzés:** néhány csatorlnál (pl. DUNA HD, M2/Petőfi TV HD, M4 Sport HD) a névformátum annyira eltér
-(`"Duna TV"`, `"m2 HD"`, `"m4"`), hogy még a HD-dedupe után sem párosul automatikusan — ezekhez kézi
-csatorna-ID alias szükséges a scriptben. A helyi/kábeltévés csatornák egy része (pl. Kispest TV, Buda TV,
-felnőtt csatornák) pedig **nincs is benne** az epgshare01 HU1 forrásban — ezekhez nincs ingyenes magyar EPG.
+**Új alias hozzáadása:** ha egy másik csatornánál is hasonló, tartósan hiányzó EPG-t találsz, keresd meg a
+forrás channel ID-jét (`grep -oP '<channel id="[^"]+">\s*<display-name[^>]*>[^<]*NÉVRÉSZLET' guide.xml`
+egy friss, dedupe előtti letöltésen), és vedd fel az `ALIASES` szótárba.
+
+**Megjegyzés:** a helyi/kábeltévés csatornák egy része (pl. Kispest TV, Buda TV, felnőtt csatornák) **nincs
+is benne** az epgshare01 HU1 forrásban — ezekhez sem a HD-dedupe, sem az alias nem segít, mert nincs mit
+párosítani. Ezekhez a TVheadend webUI-n kézzel is felvihető EPG-esemény (**DVR → Electronic Program Guide**,
+jobb klikk egy üres sávra → **Add**), de ez nem frissül automatikusan — csak egyszeri, statikus bejegyzés.
 
 ### OTA EPG letiltása (fontos!)
 
@@ -479,6 +522,13 @@ for e in d.get('entries',[]): print('signal:', e.get('signal'), '| snr:', e.get(
 "
 ```
 
+### Jellyfin Live TV — a plugin passzív, nem próbál csatlakozni induláskor
+
+A telepített `jellyfin-plugin-tvheadend` egy `ILiveTvService`-alapú plugin — **nem** a `livetv.xml`
+`TunerHosts` mezőjén keresztül működik (azt üresen kell hagyni, ne szerkeszd kézzel!). A plugin csak
+akkor kapcsolódik a TVheadend szerverhez, amikor ténylegesen megnyitod a Live TV oldalt a Jellyfin
+kliensben — induláskor a logban nem várható semmilyen TVheadend/HTSP kapcsolódási kísérlet, ez normális.
+
 ### DVB-C hálózat beállítása (One)
 
 ```
@@ -553,11 +603,12 @@ https://github.com/jellyfin/jellyfin-media-player/releases/latest
 
 | Csatorna | Státusz |
 |---|---|
-| M1 | ✅ |
-| M2 / Petőfi TV | ✅ |
-| DUNA | ✅ |
-| M4 Sport | ✅ |
-| M5 | ✅ |
+| M1 HD | ✅ (EPG alias-szal) |
+| M2 / Petőfi TV HD | ✅ (EPG alias-szal) |
+| DUNA HD | ✅ (EPG alias-szal) |
+| M4 Sport HD | ✅ (EPG alias-szal) |
+| DUNA W/M4 Sport+ HD | ✅ (EPG alias-szal) |
+| M5 HD | ✅ (EPG alias-szal) |
 | RTL | ✅ |
 | TV2 | ✅ |
 | RTL Kettő | ✅ |
@@ -590,10 +641,11 @@ https://github.com/jellyfin/jellyfin-media-player/releases/latest
 - [x] HD-csatornák EPG dedupe scriptje (`hd_dedupe_epg.py`)
 - [x] Idle Scan kikapcsolva mindkét DVB-C hálózaton
 - [x] Hiányzó "Map services" pótlása — 46 új csatorna (`channel/create` API)
+- [x] DUNA HD / M2 HD / M4 Sport HD / M1 HD / M5 HD / DUNA World EPG alias
 - [ ] USB CI modul + CAM kártya (titkosított One csatornákhoz)
 - [ ] DVR profilok hozzárendelése csatornákhoz
-- [ ] DUNA HD / M2 HD / M4 Sport HD EPG kézi channel-alias
 - [ ] 362MHz és 370MHz mux gyenge jelének kivizsgálása (kábelezés/splitter?)
+- [ ] Teljes One "Family" csomag csatornalista összevetése a TVheadend állapottal (PDF alapján)
 
 ---
 
@@ -635,10 +687,11 @@ DVB-C tunernél az EIT grabber folyamatosan szkenneli az összes muxot. Kapcsold
 Lásd fent, "EPG beállítása" szakasz — leggyakoribb ok: **több `.xml` fájl a `/config/data/` mappában**,
 amit a `tv_grab_file` egyetlen érvénytelen dokumentummá fűz össze. Csak 1 fájl (`guide.xml`) lehet ott.
 
-### TVheadend — Hiányos EPG (HD csatornáknak nincs műsorújsága)
+### TVheadend — Hiányos EPG (HD/eltérő nevű csatornáknak nincs műsorújsága)
 
 Lásd fent, "Hiányos EPG" szakasz — `hd_dedupe_epg.py` script duplikálja a nem-HD forrás-csatornákat
-HD változatra is, hogy a fuzzy name-matching megtalálja őket.
+HD változatra, és egy `ALIASES` szótár alapján explicit alias-channeleket is létrehoz az erősen eltérő
+nevű csatornákhoz (DUNA HD, M2 HD stb.). Ellenőrizd, hogy a hívás benne van-e az `epg_update.sh`-ban.
 
 ### TVheadend — Csatornák nem indulnak el ("No input detected")
 
@@ -679,6 +732,11 @@ apt-get install -y mesa-va-drivers
 
 Ne használd a `http://tvheadend:9981/xmltv/channels` URL-t — UUID alapú channel ID-kat exportál.
 Használd helyette közvetlenül: `https://epgshare01.online/epgshare01/epg_ripper_HU1.xml.gz`
+
+### Jellyfin Live TV — plugin passzív, nem próbál csatlakozni induláskor
+
+Lásd fent, "Jellyfin Live TV — a plugin passzív" szakasz. Ne szerkeszd kézzel a `livetv.xml`
+`TunerHosts` mezőjét — a `jellyfin-plugin-tvheadend` nem azon keresztül működik.
 
 ### Gluetun healthcheck
 
