@@ -192,7 +192,9 @@ xmltv: /usr/bin/tv_grab_file:  channels   tot=  193 new=    0 mod=    3
 xmltv: /usr/bin/tv_grab_file:  broadcasts tot=    0 new=    0 mod=    0   ← hiba!
 ```
 
-**Ok:** a `tv_grab_file` script tartalma (linuxserver.io image):
+**Két lehetséges ok:**
+
+**1. Több `.xml` fájl a `/config/data/` mappában.** A `tv_grab_file` script tartalma (linuxserver.io image):
 
 ```bash
 if (( $# < 1 )); then
@@ -201,11 +203,13 @@ if (( $# < 1 )); then
 fi
 ```
 
-Ha **egynél több** `.xml` fájl van a `/config/data/` mappában (pl. egy régi, kézzel odamásolt fájl a napi
-`guide.xml` mellett), a `cat` mindet összefűzi. Két `<?xml ...?>` deklaráció és két `<tv>` gyökérelem kerül
-egymás mellé egy "dokumentumba" — ez érvénytelen XML. A TVheadend XML parsere ilyenkor csendben csak az első
-`<tv>...</tv>` blokkot (jellemzően a `<channel>` lista, ami elöl van a fájlban) dolgozza fel, a később következő
-`<programme>` elemeket eldobja, hibaüzenet vagy warning nélkül.
+Ha egynél több `.xml` fájl van ott (pl. egy régi, kézzel odamásolt fájl a napi `guide.xml` mellett), a `cat`
+mindet összefűzi. Két `<?xml ...?>` deklaráció és két `<tv>` gyökérelem kerül egymás mellé egy "dokumentumba"
+— ez érvénytelen XML. A TVheadend XML parsere ilyenkor csendben csak az első `<tv>...</tv>` blokkot (a
+`<channel>` lista, ami elöl van) dolgozza fel, a később következő `<programme>` elemeket eldobja.
+
+**2. Escapeletlen speciális karakter (pl. `&`) egy kézzel beszúrt csatornanévben** — lásd lentebb a
+"Hiányos EPG" szakasz `xml_escape` megjegyzését. Ugyanezt a "csendes eldobás" mintát okozza.
 
 **Megoldás:**
 
@@ -216,9 +220,15 @@ ls -la /opt/tvheadend/config/data/
 # 2. Töröld a fölösleges/régi fájl(oka)t, csak a guide.xml maradjon
 rm -f /opt/tvheadend/config/data/epg_hu.xml   # vagy bármi más régi fájl
 
-# 3. Ellenőrzés: összefűzve is pontosan 1 <?xml> és 1 <tv> gyökérelem legyen
-docker exec tvheadend sh -c "cat /config/data/*.xml | grep -c '<?xml'"   # → 1
-docker exec tvheadend sh -c "cat /config/data/*.xml | grep -c '<tv '"    # → 1
+# 3. XML validitás ellenőrzés — ez elkapja mindkét okot (duplikátum ÉS escape-hiba)
+python3 -c "
+import xml.etree.ElementTree as ET
+try:
+    ET.parse('/opt/tvheadend/config/data/guide.xml')
+    print('VALID XML')
+except Exception as e:
+    print('INVALID:', e)
+"
 
 # 4. Re-run Internal EPG Grabbers (webUI gomb, vagy API)
 curl -s -X POST "http://10.10.40.32:9981/api/epggrab/internal/rerun" -d "rerun=1"
@@ -244,15 +254,19 @@ műsoradatot. A hiányzók két csoportba esnek:
 1. **`" HD"` végű csatornanevek** (ATV HD, TV2 HD, RTL HD stb.) — a forrás a legtöbb csatornát HD jelző
    nélkül listázza (pl. `"ATV"`), a `tv_grab_file` fuzzy name-matchingje kis/nagybetűre és a pontos
    TVheadend-névre érzékeny, ezért nem párosul automatikusan a `" HD"` végű változattal.
-2. **Erősen eltérő névformátumú csatornák** (DUNA HD, M2/Petőfi TV HD, M4 Sport HD, DUNA W/M4 Sport+ HD,
-   M1 HD, M5 HD) — a forrásban `"Duna TV"`, `"m2 HD"`, `"m4"`, `"Duna World"`, `"m1 HD"`, `"m5"` néven
-   szerepelnek, ami túlságosan eltér a TVheadend-beli csatornanevedtől ahhoz, hogy a `" HD"` toldalékos
-   dedupe (1. pont) megtalálja — ezeknél **explicit alias** kell.
+2. **Erősen eltérő névformátumú csatornák** (DUNA HD, M2/Petőfi TV HD, M4 Sport HD, SAT1, VIASAT2/3,
+   TV5 Monde, English Club HD, HISTORY HD, Kölyök Klub HD, Magyar Sláger TV, The Fishing & Hunting HD,
+   Fashion TV stb.) — a forrásban `"Duna TV"`, `"m2 HD"`, `"m4"`, `"SAT 1"`, `"Viasat 2"`, `"TV5"`,
+   `"English Club TV"`, `"The History HD"`, `"Kölyökklub"`, `"Sláger TV"`, `"Fishing and Hunting
+   Channel"`, `"Fashionbox"` néven szerepelnek — túlságosan eltér a TVheadend-beli csatornanevedtől
+   ahhoz, hogy a `" HD"` toldalékos dedupe (1. pont) megtalálja. Ezeknél **explicit alias** kell.
 
 **Megoldás:** a letöltés után egy Python post-processzáló (a) minden nem-HD `<channel>` blokkot duplikál
 `" HD"` toldalékkal, (b) egy explicit `ALIASES` szótár alapján további csatorna-klónokat hoz létre a
 forrás channel ID-ről a te pontos TVheadend-csatornanevedre. Mindkettő a hozzá tartozó `<programme>`
-elemeket is átmásolja az új ID-re:
+elemeket is átmásolja az új ID-re. Az alias-nevek `xml_escape`-elve kerülnek be — **ez kritikus**: a
+`"The Fishing & Hunting HD"` típusú nevekben a nyers `&` érvénytelen XML-t generálna, ami a teljes
+`guide.xml` parse-t elrontja (lásd fent, "EPG csendben nem importál semmit" 2. ok):
 
 ```bash
 cat > /opt/tvheadend/hd_dedupe_epg.py << 'PYEOF'
@@ -264,6 +278,7 @@ Emellett explicit alias-channeleket is letrehoz azokhoz a TVheadend
 csatornanevekhez, amik nevformatuma tul elter a forrastol a fuzzy
 matchinghez (pl. 'M2 / Petofi TV HD', 'DUNA HD', 'M4 Sport HD')."""
 import re
+from xml.sax.saxutils import escape as xml_escape
 
 GUIDE = '/opt/tvheadend/config/data/guide.xml'
 
@@ -275,7 +290,7 @@ channel_blocks = re.findall(r'<channel id="[^"]+">.*?</channel>', content, re.DO
 extra_channels = []
 extra_programmes_map = {}
 
-# --- 1. altalanos HD dedupe ---
+# --- 1. altalanos HD dedupe (mint korabban) ---
 for block in channel_blocks:
     id_m = re.search(r'<channel id="([^"]+)">', block)
     name_m = re.search(r'<display-name[^>]*>([^<]+)</display-name>', block)
@@ -295,12 +310,22 @@ for block in channel_blocks:
 # --- 2. explicit alias-channelek: forras-id -> pontos TVheadend csatornanev ---
 # Bővítsd ezt a szótárt, ha újabb erősen-eltérő-nevű csatornát találsz.
 ALIASES = {
-    'm1.HD.hu':        'M1 HD',
-    'm2.HD.hu':        'M2 / Petőfi TV HD',
-    'Duna.TV.hu':      'DUNA HD',
-    'm4.hu':           'M4 Sport HD',
-    'Duna.World.hu':   'DUNA W/M4 Sport+ HD',
-    'm5.hu':           'M5 HD',
+    'm1.HD.hu':                       'M1 HD',
+    'm2.HD.hu':                       'M2 / Petőfi TV HD',
+    'Duna.TV.hu':                     'DUNA HD',
+    'm4.hu':                          'M4 Sport HD',
+    'Duna.World.hu':                  'DUNA W/M4 Sport+ HD',
+    'm5.hu':                          'M5 HD',
+    'English.Club.TV.hu':             'English Club HD',
+    'Fashionbox.hu':                  'Fashion TV',
+    'The.History.HD.hu':              'HISTORY HD',
+    'Kölyökklub.hu':                  'Kölyök Klub HD',
+    'Sláger.TV.hu':                   'Magyar Sláger TV',
+    'SAT.1.hu':                       'SAT1',
+    'Fishing.and.Hunting.Channel.hu': 'The Fishing & Hunting HD',
+    'TV5.hu':                         'TV5 Monde',
+    'Viasat.2.hu':                    'VIASAT2',
+    'Viasat.3.hu':                    'VIASAT3',
 }
 
 for src_id, alias_name in ALIASES.items():
@@ -312,7 +337,7 @@ for src_id, alias_name in ALIASES.items():
     alias_id = src_id + '.alias'
     new_block = re.sub(r'<channel id="[^"]+">', f'<channel id="{alias_id}">', src_block, count=1)
     new_block = re.sub(r'<display-name[^>]*>[^<]+</display-name>',
-                        f'<display-name>{alias_name}</display-name>', new_block, count=1)
+                        f'<display-name>{xml_escape(alias_name)}</display-name>', new_block, count=1)
     extra_channels.append(new_block)
     extra_programmes_map[src_id] = alias_id
 
@@ -345,14 +370,32 @@ chown 1000:1000 /opt/tvheadend/config/data/guide.xml
 # szükség esetén teljes EPG reset is (lásd fenti szakasz)
 ```
 
-**Új alias hozzáadása:** ha egy másik csatornánál is hasonló, tartósan hiányzó EPG-t találsz, keresd meg a
-forrás channel ID-jét (`grep -oP '<channel id="[^"]+">\s*<display-name[^>]*>[^<]*NÉVRÉSZLET' guide.xml`
-egy friss, dedupe előtti letöltésen), és vedd fel az `ALIASES` szótárba.
+**Új alias hozzáadása:** ha egy másik csatornánál is hasonló, tartósan hiányzó EPG-t találsz:
 
-**Megjegyzés:** a helyi/kábeltévés csatornák egy része (pl. Kispest TV, Buda TV, felnőtt csatornák) **nincs
-is benne** az epgshare01 HU1 forrásban — ezekhez sem a HD-dedupe, sem az alias nem segít, mert nincs mit
-párosítani. Ezekhez a TVheadend webUI-n kézzel is felvihető EPG-esemény (**DVR → Electronic Program Guide**,
-jobb klikk egy üres sávra → **Add**), de ez nem frissül automatikusan — csak egyszeri, statikus bejegyzés.
+```bash
+# forrás channel ID keresése egy friss, dedupe előtti letöltésen, kulcsszó szerint
+pct exec 302 -- python3 -c "
+import re
+with open('/opt/tvheadend/config/data/guide.xml') as f:
+    content = f.read()
+targets = ['NÉVRÉSZLET1', 'NÉVRÉSZLET2']  # kisbetűs kulcsszavak
+ids = re.findall(r'<channel id=\"([^\"]+)\">\s*<display-name[^>]*>([^<]+)</display-name>', content)
+seen = set()
+for cid, name in ids:
+    if cid in seen: continue
+    seen.add(cid)
+    if any(t in name.lower() for t in targets):
+        print(cid, '|', name)
+"
+```
+
+majd vedd fel az `ALIASES` szótárba a `hd_dedupe_epg.py`-ban.
+
+**Megjegyzés:** a helyi/kábeltévés csatornák egy része (pl. Kispest TV, Buda TV, Rákosmente TV, Szilas TV,
+Williams TV, XV. TV, Régió Plusz TV, 16TV, 9.TV, Centrum TV, EKT, felnőtt csatornák) **nincs is benne** az
+epgshare01 HU1 forrásban — ezekhez sem a HD-dedupe, sem az alias nem segít, mert nincs mit párosítani.
+Ezekhez a TVheadend webUI-n kézzel is felvihető EPG-esemény (**DVR → Electronic Program Guide**, jobb klikk
+egy üres sávra → **Add**), de ez nem frissül automatikusan — csak egyszeri, statikus bejegyzés.
 
 ### OTA EPG letiltása (fontos!)
 
@@ -609,6 +652,7 @@ https://github.com/jellyfin/jellyfin-media-player/releases/latest
 | M4 Sport HD | ✅ (EPG alias-szal) |
 | DUNA W/M4 Sport+ HD | ✅ (EPG alias-szal) |
 | M5 HD | ✅ (EPG alias-szal) |
+| SAT1, VIASAT2, VIASAT3, TV5 Monde, English Club HD, HISTORY HD, Kölyök Klub HD, Magyar Sláger TV, The Fishing & Hunting HD, Fashion TV | ✅ (EPG alias-szal) |
 | RTL | ✅ |
 | TV2 | ✅ |
 | RTL Kettő | ✅ |
@@ -619,6 +663,7 @@ https://github.com/jellyfin/jellyfin-media-player/releases/latest
 | TV4 | ✅ |
 | Hangulat TV | ✅ |
 | CNN, Discovery Channel, TLC, Disney Channel, Cartoon Network, Nickelodeon, Nat Geo HD, +40 további | ⚠️ csatorna létrehozva, néhány mux (362MHz, 370MHz) gyenge jelű — lásd "Csak a csatornák töredéke élő" |
+| BKTV, Buda TV, Kispest TV, Rákosmente TV, Szilas TV, Williams TV, XV. TV, Régió Plusz TV, 16TV, 9.TV, Centrum TV, EKT és hasonló helyi csatornák | ⚠️ nincs EPG forrás (epgshare01-ben nem szerepelnek) — csak kézi EPG-bevitel lehetséges |
 
 ### Következő lépések
 
@@ -642,6 +687,9 @@ https://github.com/jellyfin/jellyfin-media-player/releases/latest
 - [x] Idle Scan kikapcsolva mindkét DVB-C hálózaton
 - [x] Hiányzó "Map services" pótlása — 46 új csatorna (`channel/create` API)
 - [x] DUNA HD / M2 HD / M4 Sport HD / M1 HD / M5 HD / DUNA World EPG alias
+- [x] SAT1 / VIASAT2 / VIASAT3 / TV5 Monde / English Club HD / HISTORY HD / Kölyök Klub HD /
+      Magyar Sláger TV / The Fishing & Hunting HD / Fashion TV EPG alias (16 alias összesen)
+- [x] `xml_escape` a `hd_dedupe_epg.py`-ban — `&`-t tartalmazó csatornanevek nem törik el a guide.xml-t
 - [ ] USB CI modul + CAM kártya (titkosított One csatornákhoz)
 - [ ] DVR profilok hozzárendelése csatornákhoz
 - [ ] 362MHz és 370MHz mux gyenge jelének kivizsgálása (kábelezés/splitter?)
@@ -684,14 +732,16 @@ DVB-C tunernél az EIT grabber folyamatosan szkenneli az összes muxot. Kapcsold
 
 ### TVheadend — EPG csendben nem importál semmit (channels OK, broadcasts=0)
 
-Lásd fent, "EPG beállítása" szakasz — leggyakoribb ok: **több `.xml` fájl a `/config/data/` mappában**,
-amit a `tv_grab_file` egyetlen érvénytelen dokumentummá fűz össze. Csak 1 fájl (`guide.xml`) lehet ott.
+Lásd fent, "EPG csendben nem importál semmit" szakasz — két lehetséges ok: **több `.xml` fájl a
+`/config/data/` mappában**, vagy **escapeletlen speciális karakter** (pl. `&`) egy alias-névben. Mindkettőt
+egy `ET.parse()`-os XML-validitás-ellenőrzéssel lehet gyorsan kizárni.
 
 ### TVheadend — Hiányos EPG (HD/eltérő nevű csatornáknak nincs műsorújsága)
 
 Lásd fent, "Hiányos EPG" szakasz — `hd_dedupe_epg.py` script duplikálja a nem-HD forrás-csatornákat
 HD változatra, és egy `ALIASES` szótár alapján explicit alias-channeleket is létrehoz az erősen eltérő
-nevű csatornákhoz (DUNA HD, M2 HD stb.). Ellenőrizd, hogy a hívás benne van-e az `epg_update.sh`-ban.
+nevű csatornákhoz (DUNA HD, M2 HD, SAT1, VIASAT2/3 stb. — 16 alias jelenleg). Ellenőrizd, hogy a hívás
+benne van-e az `epg_update.sh`-ban, és hogy az alias-nevek `xml_escape`-elve kerülnek be.
 
 ### TVheadend — Csatornák nem indulnak el ("No input detected")
 
