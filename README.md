@@ -25,7 +25,8 @@ CT302 (docker-host) /mnt/mediastore/
 │   │   └── incomplete/
 │   ├── movies/           ← Radarr library  (hardlinked from torrents/movies/)
 │   ├── tv/               ← Sonarr library  (hardlinked from torrents/tv/)
-│   └── music/            ← Lidarr library  (hardlinked from torrents/music/)
+│   ├── music/            ← Lidarr library  (hardlinked from torrents/music/)
+│   └── epg/              ← TVheadend guide.xml másolata, Jellyfin számára elérhető
 └── recordings/           ← TVheadend DVR felvételek
     ├── movies/           ← Jellyfin: Filmek könyvtár
     ├── tvshows/          ← Jellyfin: Sorozatok könyvtár
@@ -50,6 +51,7 @@ CT302 (docker-host) /mnt/mediastore/
 | `homepage` | 3001 | Dashboard |
 | `tdarr` | 8265 | Transcode automation (scheduled) |
 | `tvheadend` | 9981/9982 | IPTV server + DVR + EPG (DVB-C tuner) ✅ ACTIVE |
+| `epg-http` | 8181 | nginx:alpine — guide.xml statikus HTTP kiszolgálása Jellyfinnek ✅ ACTIVE |
 
 ---
 
@@ -69,7 +71,8 @@ Koax splitter (1→2)
        WiFi/LAN
             ↓
        LG webOS TVheadend app (HTSP port 9982) ✅
-       Jellyfin Live TV (TVheadend plugin) ✅
+       Jellyfin Live TV (TVheadend plugin, csatornák+stream) ✅
+       Jellyfin Live TV (epg-http/guide.xml, műsorújság) ✅
        Jellyfin Media Player (Windows desktop) ✅
        + bármely eszköz (telefon, tablet, Kodi)
 ```
@@ -158,8 +161,11 @@ curl -s -L "https://epgshare01.online/epgshare01/epg_ripper_HU1.xml.gz" \
   | gunzip > /opt/tvheadend/config/data/guide.xml
 sed -i '/<!DOCTYPE/d' /opt/tvheadend/config/data/guide.xml
 python3 /opt/tvheadend/hd_dedupe_epg.py
+cp /opt/tvheadend/config/data/guide.xml /mnt/mediastore/data/epg/guide.xml
+chmod 644 /mnt/mediastore/data/epg/guide.xml
 EOF
 chmod +x /opt/tvheadend/epg_update.sh
+mkdir -p /mnt/mediastore/data/epg
 /opt/tvheadend/epg_update.sh
 
 # Napi automatikus frissítés (cron.d — külön fájl, nem echo >> egy meglévőbe!)
@@ -171,6 +177,11 @@ chmod 644 /etc/cron.d/tvheadend
 kézzel, vagy egy korábbi verzió maradt aktív), a napi 04:00-s cron a friss `guide.xml`-t a HD-dedupe/alias
 nélküli, "csupasz" forrásra cseréli, és a HD-végződésű + alias csatornák EPG-je egyik napról a másikra eltűnik.
 Mindig ellenőrizd `cat /opt/tvheadend/epg_update.sh`-val, hogy a hívás a helyén van-e egy frissítés után.
+
+A **`cp .../guide.xml /mnt/mediastore/data/epg/guide.xml`** sor teszi elérhetővé a fájlt a Jellyfin konténer
+számára is (lásd lentebb "Jellyfin Live TV integráció" — Jellyfin ugyanis nem éri el közvetlenül a
+`/opt/tvheadend/config/data/`-t, mert az a CT302 hoszt saját fájlrendszerén van, nem a Jellyfin
+docker-compose-jában mountolt egyik útvonalon sem).
 
 TVheadend-ben: **Configuration → Channel/EPG → EPG Grabber Modules** → engedélyezd: **Internal XMLTV: XML file grabber**
 
@@ -622,8 +633,54 @@ curl -s -X POST "http://10.10.40.32:9981/api/dvr/entry/remove" -d "uuid=<UUID>"
    - Username: `admin`
    - Password: `admin`
 3. Dashboard → Live TV → TV műsorújság-szolgáltatók → **XMLTV**
-   - URL: `https://epgshare01.online/epgshare01/epg_ripper_HU1.xml.gz`
-   - ⚠️ NE használd a TVheadend XMLTV URL-t (`/xmltv/channels`) — az UUID alapú ID-kat exportál ami nem párosítható az EPG adatokkal!
+   - **Fájl vagy webcím:** `http://10.10.40.32:8181/guide.xml` (ajánlott — lásd "Saját guide.xml
+     kiszolgálása Jellyfinnek" szakasz), vagy alternatívaként fájlként `/data/epg/guide.xml`
+   - ⚠️ **NE** a raw `https://epgshare01.online/epgshare01/epg_ripper_HU1.xml.gz` URL-t használd — abban
+     nincs benne a HD-dedupe/alias (DUNA HD, M2 HD, SAT1 stb. hiányozna a Jellyfin-oldali EPG-ből is),
+     ugyanaz a probléma jelentkezne, mint a TVheadend-nél a fejezet elején.
+   - ⚠️ **NE** a TVheadend saját XMLTV URL-jét (`/xmltv/channels`) használd — UUID alapú channel ID-kat
+     exportál, ami nem párosítható a plugin channel-adataival.
+   - **Film/Gyermek/Hírek/Sport kategóriák:** opcionális, `|`-vel elválasztott kulcsszavak, pl. Gyermek:
+     `Gyermek|Rajzfilm|Mese`, Hírek: `Hírek|Hírműsor`, Sport: `Sport` — hagyd üresen, ha nem fontos a
+     kategorizálás.
+   - **Felhasználó ügynök:** üresen hagyható.
+   - **"Engedélyezze az összes tuner eszközre":** bekapcsolható, ha csak egy TVheadend-forrás van (ez itt
+     a normál eset).
+
+### Saját guide.xml kiszolgálása Jellyfinnek
+
+A Jellyfin (LiveTV plugin) és a TVheadend `guide.xml`-je **különböző docker konténerek különböző
+volume-jain** vannak, ezért a Jellyfin nem éri el közvetlenül a TVheadend fájlját. Két megoldás — mindkettő
+egyszerre is használható, redundanciaként:
+
+**A) Fájl elérési út** — a `guide.xml` bemásolása a Jellyfin `/data`-jába (ez már mountolva van):
+
+```bash
+mkdir -p /mnt/mediastore/data/epg
+cp /opt/tvheadend/config/data/guide.xml /mnt/mediastore/data/epg/guide.xml
+chmod 644 /mnt/mediastore/data/epg/guide.xml
+# Jellyfin konténeren belül ez /data/epg/guide.xml lesz
+```
+
+Ezt a lépést az `epg_update.sh` már tartalmazza (lásd fent "EPG beállítása"), tehát napi 04:00-kor
+automatikusan frissül.
+
+**B) HTTP kiszolgálás** — egy könnyű nginx konténer, ami a `guide.xml`-t közvetlenül a TVheadend
+konfigmappájából szolgálja ki (nincs másolás, mindig azonnal friss):
+
+```bash
+docker run -d \
+  --name epg-http \
+  --restart unless-stopped \
+  -p 8181:80 \
+  -v /opt/tvheadend/config/data:/usr/share/nginx/html:ro \
+  nginx:alpine
+
+# ellenőrzés
+curl -s -o /dev/null -w "http_code=%{http_code}\n" http://10.10.40.32:8181/guide.xml
+```
+
+Elérhető: `http://10.10.40.32:8181/guide.xml`
 
 ### Jellyfin recordings könyvtárak
 
@@ -680,7 +737,7 @@ https://github.com/jellyfin/jellyfin-media-player/releases/latest
 - [x] Jellyfin TVHeadend plugin telepítve
 - [x] Jellyfin recordings könyvtárak hozzáadva
 - [x] VA-API Mesa driver telepítve (MPEG2/H264 hardveres dekódolás)
-- [x] Jellyfin Live TV EPG beállítva (epgshare01.online)
+- [x] Jellyfin Live TV EPG beállítva (saját guide.xml — fájl ÉS HTTP is)
 - [x] Jellyfin Media Player Windows desktop telepítve
 - [x] EPG cron aktiválva (`/etc/cron.d/tvheadend`, napi 04:00)
 - [x] HD-csatornák EPG dedupe scriptje (`hd_dedupe_epg.py`)
@@ -690,6 +747,8 @@ https://github.com/jellyfin/jellyfin-media-player/releases/latest
 - [x] SAT1 / VIASAT2 / VIASAT3 / TV5 Monde / English Club HD / HISTORY HD / Kölyök Klub HD /
       Magyar Sláger TV / The Fishing & Hunting HD / Fashion TV EPG alias (16 alias összesen)
 - [x] `xml_escape` a `hd_dedupe_epg.py`-ban — `&`-t tartalmazó csatornanevek nem törik el a guide.xml-t
+- [x] epg-http (nginx:alpine, port 8181) — guide.xml HTTP kiszolgálás Jellyfinnek
+- [x] guide.xml másolás /mnt/mediastore/data/epg/-be — fájl-alapú elérés Jellyfinnek
 - [ ] USB CI modul + CAM kártya (titkosított One csatornákhoz)
 - [ ] DVR profilok hozzárendelése csatornákhoz
 - [ ] 362MHz és 370MHz mux gyenge jelének kivizsgálása (kábelezés/splitter?)
@@ -778,10 +837,10 @@ apt-get install -y mesa-va-drivers
 # Majd Jellyfin Dashboard → Lejátszás → Átkódolás → MPEG2 hardveres dekódolás ✅
 ```
 
-### Jellyfin Live TV EPG — UUID alapú ID-k
+### Jellyfin Live TV EPG — saját guide.xml, nem a raw forrás vagy a TVheadend export
 
-Ne használd a `http://tvheadend:9981/xmltv/channels` URL-t — UUID alapú channel ID-kat exportál.
-Használd helyette közvetlenül: `https://epgshare01.online/epgshare01/epg_ripper_HU1.xml.gz`
+Lásd fent, "Saját guide.xml kiszolgálása Jellyfinnek" szakasz. Se a raw epgshare01 URL-t, se a
+TVheadend `/xmltv/channels` exportot ne használd — mindkettő elveszíti a HD-dedupe/alias eredményét.
 
 ### Jellyfin Live TV — plugin passzív, nem próbál csatlakozni induláskor
 
