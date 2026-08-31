@@ -100,6 +100,12 @@ services:
     ports:
       - "9981:9981"
       - "9982:9982"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:9981/ping"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 EOF
 
 cd /opt/tvheadend
@@ -721,6 +727,211 @@ https://github.com/jellyfin/jellyfin-media-player/releases/latest
 | Hangulat TV | ✅ |
 | CNN, Discovery Channel, TLC, Disney Channel, Cartoon Network, Nickelodeon, Nat Geo HD, +40 további | ⚠️ csatorna létrehozva, néhány mux (362MHz, 370MHz) gyenge jelű — lásd "Csak a csatornák töredéke élő" |
 | BKTV, Buda TV, Kispest TV, Rákosmente TV, Szilas TV, Williams TV, XV. TV, Régió Plusz TV, 16TV, 9.TV, Centrum TV, EKT és hasonló helyi csatornák | ⚠️ nincs EPG forrás (epgshare01-ben nem szerepelnek) — csak kézi EPG-bevitel lehetséges |
+
+### ⚠️ Csatornák nem indulnak el ("No assigned adapters") — Docker devices vs volumes
+
+**Tünet:** a webUI elérhető, a csatornalista és az EPG is megvan, de minden csatorna streamelése "No assigned adapters" hibával elszáll. A logban:
+
+```
+subscription: NNNN: No input source available for subscription "HTTP" to channel "..."
+webui: Couldn't start streaming ..., No assigned adapters
+```
+
+**Ok:** a `/dev/dvb` Docker container-be való átengedése **`volumes:`** helyett **`devices:`** beállítással történt. A `volumes:` bind mount csak a fájlrendszert mountolja, de **nem adja át a cgroup device access jogosultságokat** — emiatt a TVheadend process (vagy bárki a containerben) `PermissionError: [Errno 1] Operation not permitted` hibával nem tudja megnyitni a DVB device node-okat.
+
+Ellenőrzés:
+```bash
+# CT302-n — ha ez PermissionError-t ad, a devices hibás:
+docker exec --user root tvheadend python3 -c "open('/dev/dvb/adapter0/frontend0')"
+# Helyes kimenet: nem dob hibát
+# Hibás kimenet: PermissionError: [Errno 1] Operation not permitted
+```
+
+**Megoldás:** a `/dev/dvb` mount-ot át kell tenni `volumes:`-ból `devices:`-be:
+
+```yaml
+# HIBÁS ❌
+services:
+  tvheadend:
+    volumes:
+      - /dev/dvb:/dev/dvb
+
+# HELYES ✅
+services:
+  tvheadend:
+    volumes:
+      - /opt/tvheadend/config:/config
+      - /mnt/mediastore/recordings:/recordings
+    devices:
+      - /dev/dvb:/dev/dvb
+```
+
+Utána:
+```bash
+cd /opt/tvheadend && docker compose down && docker compose up -d
+```
+
+⚠️ **Figyelj:** ha a fájl rendszert mountolsz (nem device-et), akkor `volumes:` a helyes. A `devices:` csak valódi character device node-okhoz kell!
+
+### Homepage Dashboard Widget (CT302)
+
+A TVheadend adapter/státusz a Homepage dashboardon egyéni `customapi` widget-tel jelenik meg.
+A widget egy helyi Python HTTP szervert kérdez le, ami a TVheadend API adatait JSON-ben szolgáltatja.
+
+**Telepítés (CT302-n):**
+
+```bash
+cat > /opt/tvheadend/tvheadend-status-server.py << 'PYEOF'
+#!/usr/bin/env python3
+"""Lightweight HTTP server for TVheadend status JSON for Homepage dashboard"""
+import http.server, json, os, subprocess, socketserver
+
+PORT = 8050
+
+class TVHHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ("/status", "/"):
+            try:
+                r = subprocess.run(["curl", "-sf", "http://127.0.0.1:9981/ping"], capture_output=True, timeout=5)
+                tvh_up = r.returncode == 0
+            except:
+                tvh_up = False
+            adapter_count = 1 if os.path.exists("/dev/dvb/adapter0") else 0
+            channel_count = 0
+            try:
+                r = subprocess.run(["curl", "-s", "--digest", "-u", "admin:admin",
+                                    "http://127.0.0.1:9981/api/channel/list"], capture_output=True, timeout=5)
+                if r.returncode == 0:
+                    channel_count = len(json.loads(r.stdout).get("entries", []))
+            except:
+                pass
+            status = {"healthy": tvh_up and adapter_count > 0,
+                      "adapters": adapter_count, "channels": channel_count}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(status).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+    def log_message(self, *a): pass
+
+with socketserver.TCPServer(("0.0.0.0", PORT), TVHHandler) as h:
+    h.serve_forever()
+PYEOF
+chmod +x /opt/tvheadend/tvheadend-status-server.py
+
+# Systemd service
+cat > /etc/systemd/system/tvheadend-status.service << 'EOF'
+[Unit]
+Description=TVheadend Status API for Homepage
+After=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/tvheadend/tvheadend-status-server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload && systemctl enable --now tvheadend-status.service
+
+# Homepage services.yaml widget hozzáadás
+# (A TVheadend bejegyzés alá a widget: blokkot kell beilleszteni)
+```
+
+Homepage `services.yaml` TVheadend widget konfiguráció:
+
+```yaml
+- TVheadend:
+    icon: tvheadend.png
+    href: http://10.10.40.32:9981
+    description: Live TV, EPG, DVR
+    widget:
+      type: customapi
+      url: http://10.10.40.32:8050/status
+      method: GET
+      mappings:
+        - field: healthy
+          label: Status
+        - field: adapters
+          label: Adapters
+        - field: channels
+          label: Channels
+```
+
+Teszt: `curl -s http://10.10.40.32:8050/status`
+
+### Monitoring & Karbantartási scriptek
+
+Az alábbi scriptek a `/opt/tvheadend/` mappában találhatók CT302-n:
+
+| Script | Funkció | Cron |
+|---|---|---|
+| `monitor-tvheadend.sh` | Prometheus metrics exportálás (signal, snr, ber, channels, EPG) | `*/2 * * * *` |
+| `dvb-watchdog.sh` | Automatikus DVB adapter egészségügyi ellenőrzés + recovery triggerelés | `*/5 * * * *` |
+| `tvh-benchmark.sh` | Streaming benchmark (bitrate, packet loss, latency csatornánként) | Kézi / heti |
+| `fix-epg.sh` | EPG healthcheck és autojavítás | Kézi |
+| `recover-tvheadend.sh` | Teljes recovery (USB unbind/bind, restart, EPG) + Telegram értesítés | Kézi / watchdog trigger |
+
+**Prometheus metrics:**
+```bash
+# Prometheus textfile collector számára:
+*/2 * * * * /opt/tvheadend/monitor-tvheadend.sh > /opt/tvheadend/tvh.prom 2>/dev/null
+
+# Metrics:
+# tvh_container_healthy — Docker healthcheck (1=healthy)
+# tvh_adapter_active — DVB adapter létezik-e
+# tvh_adapter_signal_strength_dbm — Jelerősség dBm-ben
+# tvh_adapter_snr_db — Jel/zaj arány dB-ben
+# tvh_adapter_ber — Bit hiba arány
+# tvh_adapter_unc_errors — Javíthatatlan hibák
+# tvh_channel_count — Csatornák száma
+# tvh_epg_size_bytes — guide.xml méret
+# tvh_subscription_count — Aktív streaming subscription-ök
+```
+
+**DVB Watchdog:**
+```bash
+# Automatikus ellenőrzés + recovery:
+*/5 * * * * /opt/tvheadend/dvb-watchdog.sh >> /opt/tvheadend/watchdog.log 2>&1
+
+# Csak ellenőrzés (dry run):
+/opt/tvheadend/dvb-watchdog.sh --dry-run
+
+# Státusz JSON:
+/opt/tvheadend/dvb-watchdog.sh --status
+```
+
+**Streaming benchmark:**
+```bash
+# Összes csatorna tesztelése (3mp/csatorna):
+/opt/tvheadend/tvh-benchmark.sh
+
+# Első 10 csatorna, 5mp teszt:
+/opt/tvheadend/tvh-benchmark.sh --channels 10 --duration 5
+
+# JSON kimenet:
+/opt/tvheadend/tvh-benchmark.sh --json
+
+# Jelentés fájlba:
+/opt/tvheadend/tvh-benchmark.sh --output /opt/tvheadend/benchmark-report.md
+```
+
+**Telegram webhook beállítása:**
+```bash
+# A recover-tvheadend.sh automatikusan küld Telegram értesítést
+# a recovery eseményekről, ha a TELEGRAM_WEBHOOK környezeti változó be van állítva:
+
+export TELEGRAM_WEBHOOK="https://api.telegram.org/bot<BOT_TOKEN>/sendMessage?chat_id=<CHAT_ID>"
+
+# Vagy a crontab-ban:
+TELEGRAM_WEBHOOK="https://api.telegram.org/botXXX/sendMessage?chat_id=YYY"
+0 * * * * /opt/tvheadend/dvb-watchdog.sh >> /opt/tvheadend/watchdog.log 2>&1
+```
 
 ### Következő lépések
 
