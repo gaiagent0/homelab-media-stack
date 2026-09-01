@@ -876,6 +876,10 @@ Az alábbi scriptek a `/opt/tvheadend/` mappában találhatók CT302-n:
 | `tvh-benchmark.sh` | Streaming benchmark (bitrate, packet loss, latency csatornánként) | Kézi / heti |
 | `fix-epg.sh` | EPG healthcheck és autojavítás | Kézi |
 | `recover-tvheadend.sh` | Teljes recovery (USB unbind/bind, restart, EPG) + Telegram értesítés | Kézi / watchdog trigger |
+| `tvh-auto-record.sh` | Automatikus DVR felvétel felírás EPG alapján | Kézi / naponta |
+| `tvh-cleanup.sh` | Felvételek takarítása (régi, szemét törlése) | `0 3 * * *` |
+| `media-healthcheck.sh` | Egységes media stack healthcheck (Jellyfin, Radarr, Sonarr, TVHeadend) | Kézi |
+| `media-integrity.sh` | Hiányzó/szakadt fájl ellenőrző (Radarr/Sonarr vs lemez) | Kézi |
 
 **Prometheus metrics:**
 ```bash
