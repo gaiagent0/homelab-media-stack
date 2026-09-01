@@ -22,6 +22,8 @@ SONARR_URL="http://127.0.0.1:8989"
 MOVIES_DIR="/mnt/mediastore/data/movies"
 TV_DIR="/mnt/mediastore/data/tv"
 RECORDINGS_DIR="/mnt/mediastore/recordings"
+# Radarr/Sonarr container paths start with /data/ but on host they're /mnt/mediastore/data/
+PATH_SUBST="s|^/data/|/mnt/mediastore/data/|"
 
 CHECK_MOVIES=true
 CHECK_TV=true
@@ -85,10 +87,11 @@ with open('$tmpf') as f:
 monitored = [m for m in movies if m.get('monitored')]
 for m in monitored:
     title = m.get('title','?')
-    path = m.get('path','')
+    # Convert container path (/data/...) to host path (/mnt/mediastore/data/...)
+    path = m.get('path','').replace('/data/','/mnt/mediastore/data/',1)
     has_file = m.get('hasFile', False)
     if has_file:
-        fp = m.get('movieFile',{}).get('path','')
+        fp = m.get('movieFile',{}).get('path','').replace('/data/','/mnt/mediastore/data/',1)
         if fp and not os.path.exists(fp):
             print(f'MISSING|{title}|{fp}')
         elif fp and os.path.exists(fp):
