@@ -973,7 +973,7 @@ TELEGRAM_WEBHOOK="https://api.telegram.org/botXXX/sendMessage?chat_id=YYY"
 
 ## Prerequisites
 
-- Proxmox VE 8.x, LXC with Docker (CT302)
+- Proxmox VE 9.2 (2026-09), LXC with Docker (CT302 @ pve-03)
 - AMD iGPU on pve-03 host for Jellyfin VA-API transcoding
 - ZFS pool or NFS for `/mnt/mediastore` storage
 - VPN credentials (PIA / Mullvad etc.) for Gluetun
@@ -1099,4 +1099,4 @@ lxc.mount.entry: /dev/dri/renderD128 dev/dri/renderD128 none bind,optional,creat
 
 ---
 
-*Tested on: Proxmox VE 7.0/8.3, AMD Ryzen Renoir iGPU, Docker 27.x, TVheadend 4.3-2660, Hauppauge WinTV-soloHD*
+*Tested on: Proxmox VE 7.0/8.3/9.2, AMD Ryzen Renoir iGPU, Docker 27.x, TVheadend 4.3-2660, Hauppauge WinTV-soloHD*
